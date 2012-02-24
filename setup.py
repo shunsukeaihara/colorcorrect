@@ -1,0 +1,31 @@
+from setuptools import setup,Extension
+import sys
+sys.path.append('./src')
+sys.path.append('./test')
+version = file('VERSION').read().strip()
+
+setup(name='colorcorrect',
+      version=version,
+      description="imprement some of color correction algorithms",
+      long_description=file('README').read(),
+      classifiers=[],
+      keywords=('image-processing computer-vision'),
+      author='Shunsuke Aihara',
+      author_email='s.aihara@gmail.com',
+      url='http://www.bitbucket.org/ynil/colorcorrect',
+      license='MIT License',
+      package_dir={'': 'src'},
+      packages=['colorcorrect'],
+      ext_modules=[
+          Extension(
+              'colorcorrect._cutil', [
+                  'cutil/cutil.cpp',
+              ],
+              include_dirs=['cutil'],
+              libraries=['m'],
+              extra_compile_args=[],
+          ),
+      ],
+      install_requires=["numpy","PIL"],
+      test_suite = 'test_colorcorrect.suite'
+      )
