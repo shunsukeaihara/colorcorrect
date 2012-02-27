@@ -24,6 +24,8 @@ class RGBImage(Structure):
 
 libcutil.calc_sdlwgw.argtypes = [POINTER(RGBImage), c_int, c_int]
 libcutil.calc_sdlwgw.restype = c_void_p
+libcutil.calc_lwgw.argtypes = [POINTER(RGBImage), c_int, c_int]
+libcutil.calc_lwgw.restype = c_void_p
 libcutil.delete_doubleptr.argtypes = [c_void_p]
 
 def stretch_pre(nimg):
@@ -147,7 +149,6 @@ def standard_deviation_and_luminance_weighted_gray_world(nimg,subwidth,subheight
     http://www.ece.umassd.edu/faculty/acosta/icassp/icassp_2004/pdfs/0300493.pdf
     """
     nimg = nimg.transpose(2, 0, 1)
-
     img = RGBImage(nimg.shape[1],
                    nimg.shape[0],
                    nimg[0].ctypes.data_as(POINTER(c_ubyte)),
@@ -158,7 +159,30 @@ def standard_deviation_and_luminance_weighted_gray_world(nimg,subwidth,subheight
     gains = np.ctypeslib.as_array(gains.from_address(ret))
     gains = gains.copy()
     libcutil.delete_doubleptr(ret)
-    nimg[0] = nimg[0]*gains[0]
-    nimg[1] = nimg[1]*gains[1]
-    nimg[2] = nimg[2]*gains[2]
+    nimg =  nimg.astype(np.uint32)
+    nimg[0] = np.minimum(nimg[0]*gains[0],255)
+    nimg[1] = np.minimum(nimg[1]*gains[1],255)
+    nimg[2] = np.minimum(nimg[2]*gains[2],255)
+    return nimg.transpose(1, 2, 0).astype(np.uint8)
+
+def luminance_weighted_gray_world(nimg,subwidth,subheight):
+    """
+    AUTOMATIC WHITE BALANCING USING LUMINANCE COMPONENT AND STANDARD DEVIATION OF RGB COMPONENTS
+    http://www.ece.umassd.edu/faculty/acosta/icassp/icassp_2004/pdfs/0300493.pdf
+    """
+    nimg = nimg.transpose(2, 0, 1)
+    img = RGBImage(nimg.shape[1],
+                   nimg.shape[0],
+                   nimg[0].ctypes.data_as(POINTER(c_ubyte)),
+                   nimg[1].ctypes.data_as(POINTER(c_ubyte)),
+                   nimg[2].ctypes.data_as(POINTER(c_ubyte)))
+    gains = c_double*3
+    ret = libcutil.calc_lwgw(pointer(img),subwidth,subheight)
+    gains = np.ctypeslib.as_array(gains.from_address(ret))
+    gains = gains.copy()
+    libcutil.delete_doubleptr(ret)
+    nimg =  nimg.astype(np.uint32)
+    nimg[0] = np.minimum(nimg[0]*gains[0],255)
+    nimg[1] = np.minimum(nimg[1]*gains[1],255)
+    nimg[2] = np.minimum(nimg[2]*gains[2],255)
     return nimg.transpose(1, 2, 0).astype(np.uint8)
