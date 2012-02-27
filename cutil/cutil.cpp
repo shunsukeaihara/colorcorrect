@@ -1,7 +1,7 @@
 #include "cutil.hpp"
 #include <vector>
 #include <math.h>
-
+#include <cfloat>
 #define SATURATION_MAX 255
 #define SATURATION_MIN 0
 
@@ -17,12 +17,15 @@ typedef struct {
 } std_t;
 
 typedef struct {
-  doubleary **rary;
-  doubleary **gary;
-  doubleary **bary;
+  double **rary;
+  double **gary;
+  double **bary;
   double rmax;
   double gmax;
   double bmax;
+  double rmin;
+  double gmin;
+  double bmin;
 } rscore_t;
 
 
@@ -110,21 +113,27 @@ void calc_ace(rgbimage_t* img){
         }
       }
       rs->rary[j][i]=r_rscore_sum;
-      rs->grys[j][i]=g_rscore_sum;
-      rb->bary[j][i]=b_rscore_sum;
-      if(r_rscore_sum> rs->rmax)
+      rs->gary[j][i]=g_rscore_sum;
+      rs->bary[j][i]=b_rscore_sum;
+      if(r_rscore_sum > rs->rmax)
         rs->rmax = r_rscore_sum;
-      if(g_rscore_sum> rs->gmax)
+      if(g_rscore_sum > rs->gmax)
         rs->gmax = g_rscore_sum;
-      if(b_rscore_sum> rs->bmax)
+      if(b_rscore_sum > rs->bmax)
         rs->bmax = b_rscore_sum;
+      if(r_rscore_sum < rs->rmin)
+        rs->rmin = r_rscore_sum;
+      if(g_rscore_sum < rs->gmin)
+        rs->gmin = g_rscore_sum;
+      if(b_rscore_sum < rs->bmin)
+        rs->bmin = b_rscore_sum;
     }
   }
 
   //Dynamic Tone Reproduction Scaling
   for(int i=0;i<img->height;++i){
     for(int j=0;j<img->width;++j){
-      
+      //scaling
     }
   }
   delete_rsocre(rs,img);
@@ -250,10 +259,13 @@ rscore_t* create_rscore(rgbimage_t* img){
   rs->rary = new_2d_mat(img);
   rs->gary = new_2d_mat(img);
   rs->bary = new_2d_mat(img);
-  rs->rmax = -10000000000;
-  rs->gmax = -10000000000;
-  rs->bmax = -10000000000;
-  return rs
+  rs->rmax = DBL_MIN;
+  rs->gmax = DBL_MIN;
+  rs->bmax = DBL_MIN;
+  rs->rmin = DBL_MAX;
+  rs->gmin = DBL_MAX;
+  rs->bmin = DBL_MAX;
+  return rs;
 }
 
 void delete_rsocre(rscore_t* rs,rgbimage_t* img){
