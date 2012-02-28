@@ -13,7 +13,7 @@ extern "C"{
 
   double* calc_sdlwgw(rgbimage_t* img, int subwidth, int subheight);
   double* calc_lwgw(rgbimage_t* img, int subwidth, int subheight);
-  void calc_ace(rgbimage_t* img);
+  void calc_ace(rgbimage_t* img,double slope, double limit);
   void delete_doubleptr(double* p);
 }
 

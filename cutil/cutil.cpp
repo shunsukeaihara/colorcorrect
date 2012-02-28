@@ -2,8 +2,6 @@
 #include <vector>
 #include <math.h>
 #include <cfloat>
-#define SATURATION_MAX 255
-#define SATURATION_MIN 0
 
 typedef std::vector<double> doubleary;
 
@@ -41,7 +39,7 @@ double calc_euclidean(int ax, int ay, int bx, int by);
 double calc_inverse_exponential(int ax, int ay, int bx, int by,double alpha);
 double calc_manhattan(int ax, int ay, int bx, int by);
 double calc_maximum(int ax, int ay, int bx, int by);
-double calc_saturation(int diff,double slope);
+double calc_saturation(int diff,double slope,double limit);
 int get_pixel(unsigned char* ary,rgbimage_t* img, int x, int y);
 void set_pixel(unsigned char* ary,rgbimage_t* img, int x, int y,unsigned char c);
 rscore_t* create_rscore(rgbimage_t* img);
@@ -58,6 +56,24 @@ double* calc_sdlwgw(rgbimage_t* img, int subwidth, int subheight){
   gains[0] = sdlwa_avg/sdlwa[0];
   gains[1] = sdlwa_avg/sdlwa[1];
   gains[2] = sdlwa_avg/sdlwa[2];
+  delete[] sdlwa;
+  return gains;
+}
+
+double* calc_acasdl(rgbimage_t* img, int subwidth, int subheight){
+  double* gains = new double[3]();
+  double subblocksize = subwidth*subheight;
+
+  std_t* stdev = calc_standard_deviation(img,subwidth,subheight,subblocksize);
+  double* sdlwa = calc_luminance_weight(img, stdev, subwidth, subheight, subblocksize);
+  delete_std(stdev);
+  double sdlwa_avg = (sdlwa[0]+sdlwa[1]+sdlwa[2])/3.0;
+  gains[0] = sdlwa_avg/sdlwa[0];
+  gains[1] = sdlwa_avg/sdlwa[1];
+  gains[2] = sdlwa_avg/sdlwa[2];
+
+
+  gains[2] = gains[2] * (((sdlwa[0]+sdlwa[1])*0.5)/sdlwa[2])
   delete[] sdlwa;
   return gains;
 }
@@ -86,7 +102,7 @@ double* calc_lwgw(rgbimage_t* img, int subwidth, int subheight){
   return gains;
 }
 
-void calc_ace(rgbimage_t* img){
+void calc_ace(rgbimage_t* img,double slope, double limit){
 
   rscore_t* rs = create_rscore(img);
   //Chromatic/Spatial Adjustment
@@ -104,9 +120,9 @@ void calc_ace(rgbimage_t* img){
         for(int l=0;l<img->width;++l){
           if(k==i&&l==j)continue;
           double dist = calc_euclidean(j,i,l,k);
-          double r_rscore = calc_saturation(r_pixel - get_pixel(img->r,img,l,k),20.0);
-          double g_rscore = calc_saturation(g_pixel - get_pixel(img->g,img,l,k),20.0);
-          double b_rscore = calc_saturation(b_pixel - get_pixel(img->b,img,l,k),20.0);
+          double r_rscore = calc_saturation(r_pixel - get_pixel(img->r,img,l,k),slope,limit);
+          double g_rscore = calc_saturation(g_pixel - get_pixel(img->g,img,l,k),slope,limit);
+          double b_rscore = calc_saturation(b_pixel - get_pixel(img->b,img,l,k),slope,limit);
           r_rscore_sum += r_rscore/dist;
           g_rscore_sum += g_rscore/dist;
           b_rscore_sum += b_rscore/dist;
@@ -311,12 +327,12 @@ double calc_maximum(int ax, int ay, int bx, int by){
   return ((fabs(ax-bx)>fabs(ay-by))? fabs(ax-bx):fabs(ay-by));
 }
 
-double calc_saturation(int diff,double slope){
+double calc_saturation(int diff,double slope,double limit){
   double ret = diff*slope;
-  if(ret>SATURATION_MAX){
-    return SATURATION_MAX;
-  }else if(ret < SATURATION_MIN){
-    return  SATURATION_MIN;
+  if(ret>limit){
+    return limit;
+  }else if(ret < (-limit)){
+    return  -limit;
   }else{
     return ret;
   }
