@@ -73,7 +73,7 @@ double* calc_acasdl(rgbimage_t* img, int subwidth, int subheight){
   gains[2] = sdlwa_avg/sdlwa[2];
 
 
-  gains[2] = gains[2] * (((sdlwa[0]+sdlwa[1])*0.5)/sdlwa[2])
+  gains[2] = gains[2] * (((sdlwa[0]+sdlwa[1])*0.5)/sdlwa[2]);
   delete[] sdlwa;
   return gains;
 }
