@@ -151,9 +151,9 @@ void calc_ace(rgbimage_t* img,double slope, double limit){
   for(int i=0;i<img->height;++i){
     for(int j=0;j<img->width;++j){
       //scaling
-      set_pixel(img->r,img,j,i,linear_scaling(rs->rary[j][i], rs->rmax,rs->rmin));
-      set_pixel(img->g,img,j,i,linear_scaling(rs->gary[j][i], rs->gmax,rs->gmin));
-      set_pixel(img->b,img,j,i,linear_scaling(rs->bary[j][i], rs->bmax,rs->bmin));
+      img->r[i*img->width+j]=linear_scaling(rs->rary[j][i],rs->rmax,rs->rmin);
+      img->g[i*img->width+j]=linear_scaling(rs->gary[j][i],rs->gmax,rs->gmin);
+      img->b[i*img->width+j]=linear_scaling(rs->bary[j][i],rs->bmax,rs->bmin);
     }
   }
   delete_rsocre(rs,img);

@@ -27,6 +27,7 @@ libcutil.calc_sdlwgw.restype = c_void_p
 libcutil.calc_lwgw.argtypes = [POINTER(RGBImage), c_int, c_int]
 libcutil.calc_lwgw.restype = c_void_p
 libcutil.delete_doubleptr.argtypes = [c_void_p]
+libcutil.calc_ace.argtypes = [POINTER(RGBImage), c_double, c_double]
 
 def stretch_pre(nimg):
     """
@@ -149,8 +150,9 @@ def standard_deviation_and_luminance_weighted_gray_world(nimg,subwidth,subheight
     http://www.ece.umassd.edu/faculty/acosta/icassp/icassp_2004/pdfs/0300493.pdf
     """
     nimg = nimg.transpose(2, 0, 1)
-    img = RGBImage(nimg.shape[1],
-                   nimg.shape[0],
+    nimg = np.ascontiguousarray(nimg,dtype=np.uint8)
+    img = RGBImage(nimg.shape[2],
+                   nimg.shape[1],
                    nimg[0].ctypes.data_as(POINTER(c_ubyte)),
                    nimg[1].ctypes.data_as(POINTER(c_ubyte)),
                    nimg[2].ctypes.data_as(POINTER(c_ubyte)))
@@ -171,8 +173,9 @@ def luminance_weighted_gray_world(nimg,subwidth,subheight):
     http://www.ece.umassd.edu/faculty/acosta/icassp/icassp_2004/pdfs/0300493.pdf
     """
     nimg = nimg.transpose(2, 0, 1)
-    img = RGBImage(nimg.shape[1],
-                   nimg.shape[0],
+    nimg = np.ascontiguousarray(nimg,dtype=np.uint8)
+    img = RGBImage(nimg.shape[2],
+                   nimg.shape[1],
                    nimg[0].ctypes.data_as(POINTER(c_ubyte)),
                    nimg[1].ctypes.data_as(POINTER(c_ubyte)),
                    nimg[2].ctypes.data_as(POINTER(c_ubyte)))
@@ -186,3 +189,14 @@ def luminance_weighted_gray_world(nimg,subwidth,subheight):
     nimg[1] = np.minimum(nimg[1]*gains[1],255)
     nimg[2] = np.minimum(nimg[2]*gains[2],255)
     return nimg.transpose(1, 2, 0).astype(np.uint8)
+
+def automatic_color_equalization(nimg,slope,limit):
+    nimg = nimg.transpose(2, 0, 1)
+    nimg = np.ascontiguousarray(nimg,dtype=np.uint8)
+    img = RGBImage(nimg.shape[2],
+                   nimg.shape[1],
+                   nimg[0].ctypes.data_as(POINTER(c_ubyte)),
+                   nimg[1].ctypes.data_as(POINTER(c_ubyte)),
+                   nimg[2].ctypes.data_as(POINTER(c_ubyte)))
+    libcutil.calc_ace(pointer(img),slope,limit)
+    return nimg.transpose(1, 2, 0)
