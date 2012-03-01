@@ -40,6 +40,7 @@ double calc_inverse_exponential(int ax, int ay, int bx, int by,double alpha);
 double calc_manhattan(int ax, int ay, int bx, int by);
 double calc_maximum(int ax, int ay, int bx, int by);
 double calc_saturation(int diff,double slope,double limit);
+unsigned char linear_scaling(double r, double max, double min);
 int get_pixel(unsigned char* ary,rgbimage_t* img, int x, int y);
 void set_pixel(unsigned char* ary,rgbimage_t* img, int x, int y,unsigned char c);
 rscore_t* create_rscore(rgbimage_t* img);
@@ -150,6 +151,9 @@ void calc_ace(rgbimage_t* img,double slope, double limit){
   for(int i=0;i<img->height;++i){
     for(int j=0;j<img->width;++j){
       //scaling
+      set_pixel(img->r,img,j,i,linear_scaling(rs->rary[j][i], rs->rmax,rs->rmin));
+      set_pixel(img->g,img,j,i,linear_scaling(rs->gary[j][i], rs->gmax,rs->gmin));
+      set_pixel(img->b,img,j,i,linear_scaling(rs->bary[j][i], rs->bmax,rs->bmin));
     }
   }
   delete_rsocre(rs,img);
@@ -344,4 +348,10 @@ int get_pixel(unsigned char* ary,rgbimage_t* img, int x, int y){
 
 void set_pixel(unsigned char* ary,rgbimage_t* img, int x, int y,unsigned char c){
   ary[y*img->width+x]=c;
+}
+
+
+unsigned char linear_scaling(double r, double max, double min){
+  double slope = (max - min)/255.0;
+  return (unsigned char)((r-min)*slope);
 }
