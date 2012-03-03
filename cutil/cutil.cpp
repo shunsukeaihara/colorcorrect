@@ -16,6 +16,9 @@ typedef struct {
   double rsum;
   double gsum;
   double bsum;
+  doubleary *ravgary;
+  doubleary *gavgary;
+  doubleary *bavgary;
 } std_t;
 
 typedef struct {
@@ -30,7 +33,7 @@ typedef struct {
   double bmin;
 } rscore_t;
 
-double calc_luminance(unsigned char r,unsigned b, unsigned g);
+double calc_luminance(unsigned char r,unsigned char b, unsigned char g);
 double triangular_function(double luminance);
 std_t* calc_standard_deviation(rgbimage_t* img,int subwidth, int subheight, double subblocksize);
 double* calc_luminance_weight(rgbimage_t* img,std_t* stdev,int subwidth, int subheight, double subblocksize);
@@ -50,6 +53,25 @@ void set_pixel(unsigned char* ary,rgbimage_t* img, int x, int y,unsigned char c)
 rscore_t* create_rscore(rgbimage_t* img);
 void delete_rsocre(rscore_t* rs,rgbimage_t* img);
 coordary create_random_pair(int size, int x,int y);
+
+double* calc_sdwgw(rgbimage_t* img, int subwidth, int subheight){
+  double* gains = new double[3]();
+  double* sdlwa = new double[3]();
+  double subblocksize = subwidth*subheight;
+  std_t* stdev = calc_standard_deviation(img,subwidth,subheight,subblocksize);
+
+  for(int i=0;i<subblocksize;++i){
+    sdlwa[0] += (stdev->rary->at(i)/stdev->rsum)*stdev->ravgary->at(i);
+    sdlwa[1] += (stdev->gary->at(i)/stdev->gsum)*stdev->gavgary->at(i);
+    sdlwa[2] += (stdev->bary->at(i)/stdev->bsum)*stdev->bavgary->at(i);
+  }
+  double sdlwa_avg = (sdlwa[0]+sdlwa[1]+sdlwa[2])/3.0;
+  gains[0] = sdlwa_avg/sdlwa[0];
+  gains[1] = sdlwa_avg/sdlwa[1];
+  gains[2] = sdlwa_avg/sdlwa[2];
+  delete[] sdlwa;
+  return gains;
+}
 
 double* calc_sdlwgw(rgbimage_t* img, int subwidth, int subheight){
   double* gains = new double[3]();
@@ -77,7 +99,6 @@ double* calc_acasdl(rgbimage_t* img, int subwidth, int subheight){
   gains[0] = sdlwa_avg/sdlwa[0];
   gains[1] = sdlwa_avg/sdlwa[1];
   gains[2] = sdlwa_avg/sdlwa[2];
-
 
   gains[2] = gains[2] * (((sdlwa[0]+sdlwa[1])*0.5)/sdlwa[2]);
   delete[] sdlwa;
@@ -181,8 +202,8 @@ std_t* calc_standard_deviation(rgbimage_t* img,int subwidth, int subheight, doub
       double avg_g=0;
       double avg_b=0;
       //iterate pixels in subblock
-      for(int k=i;k<subheight;++k){
-        for(int l=j;l<subwidth;++l){
+      for(int k=i;k<subheight+i;++k){
+        for(int l=j;l<subwidth+j;++l){
           avg_r+=img->r[k*img->width+l];
           avg_g+=img->g[k*img->width+l];
           avg_b+=img->b[k*img->width+l];
@@ -191,12 +212,15 @@ std_t* calc_standard_deviation(rgbimage_t* img,int subwidth, int subheight, doub
       avg_r = avg_r/subblocksize;
       avg_g = avg_g/subblocksize;
       avg_b = avg_b/subblocksize;
+      stdev->ravgary->push_back(avg_r);
+      stdev->gavgary->push_back(avg_g);
+      stdev->bavgary->push_back(avg_b);
       double std_r=0.0;
       double std_g=0.0;
       double std_b=0.0;
       //iterate pixels in subblock
-      for(int k=i;k<subheight;++k){
-        for(int l=j;l<subwidth;++l){
+      for(int k=i;k<subheight+i;++k){
+        for(int l=j;l<subwidth+j;++l){
           std_r+=pow(img->r[k*img->width+l]-avg_r,2.0);
           std_g+=pow(img->g[k*img->width+l]-avg_g,2.0);
           std_b+=pow(img->b[k*img->width+l]-avg_b,2.0);
@@ -224,8 +248,8 @@ double* calc_luminance_weight(rgbimage_t* img,std_t* stdev,int subwidth, int sub
       doubleary wlumi_Ary;
       double wlumi_sum=0.0;
       //iterate pixels in subblock
-      for(int k=i;k<subheight;++k){
-        for(int l=j;l<subwidth;++l){
+      for(int k=i;k<subheight+i;++k){
+        for(int l=j;l<subwidth+j;++l){
           unsigned char r=img->r[k*img->width+l];
           unsigned char g=img->g[k*img->width+l];
           unsigned char b=img->b[k*img->width+l];
@@ -240,8 +264,8 @@ double* calc_luminance_weight(rgbimage_t* img,std_t* stdev,int subwidth, int sub
       double lumi_g = 0;
       double lumi_b = 0;
       //iterate pixels in subblock
-      for(int k=i;k<subheight;++k){
-        for(int l=j;l<subwidth;++l){
+      for(int k=i;k<subheight+i;++k){
+        for(int l=j;l<subwidth+j;++l){
           lumi_r += (wlumi_Ary[subpid]/wlumi_sum)*img->r[k*img->width+l];
           lumi_g += (wlumi_Ary[subpid]/wlumi_sum)*img->g[k*img->width+l];
           lumi_b += (wlumi_Ary[subpid]/wlumi_sum)*img->b[k*img->width+l];
@@ -257,7 +281,7 @@ double* calc_luminance_weight(rgbimage_t* img,std_t* stdev,int subwidth, int sub
   return sdlwa;
 }
 
-double calc_luminance(unsigned char r,unsigned b, unsigned g){
+double calc_luminance(unsigned char r,unsigned char b, unsigned char g){
   return (0.298912*r+0.586611*g+0.114478*b);
 }
 
@@ -277,6 +301,9 @@ std_t* create_std(){
   stdev->rsum = 0.0;
   stdev->gsum = 0.0;
   stdev->bsum = 0.0;
+  stdev->ravgary = new doubleary;
+  stdev->gavgary = new doubleary;
+  stdev->bavgary = new doubleary;
   return stdev;
 }
 
@@ -284,6 +311,9 @@ void delete_std(std_t* p){
   delete p->rary;
   delete p->gary;
   delete p->bary;
+  delete p->ravgary;
+  delete p->gavgary;
+  delete p->bavgary;
   delete p;
 }
 

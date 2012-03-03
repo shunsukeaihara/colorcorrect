@@ -22,6 +22,8 @@ class RGBImage(Structure):
         ("b", POINTER(c_ubyte)),
     ]
 
+libcutil.calc_sdwgw.argtypes = [POINTER(RGBImage), c_int, c_int]
+libcutil.calc_sdwgw.restype = c_void_p
 libcutil.calc_sdlwgw.argtypes = [POINTER(RGBImage), c_int, c_int]
 libcutil.calc_sdlwgw.restype = c_void_p
 libcutil.calc_lwgw.argtypes = [POINTER(RGBImage), c_int, c_int]
@@ -98,7 +100,7 @@ def retinex_adjust(nimg):
 def retinex_with_adjust(nimg):
     return retinex_adjust(retinex(nimg))
 
-def standard_deviation_weighted_grey_world(nimg,subwidth=20,subheight=20):
+def standard_deviation_weighted_grey_world_python(nimg,subwidth=20,subheight=20):
     nimg = nimg.astype(np.uint32)
     height, width,ch = nimg.shape
     strides = nimg.itemsize*np.array([width*subheight,subwidth,width,3,1])
@@ -134,7 +136,7 @@ def standard_deviation_weighted_grey_world(nimg,subwidth=20,subheight=20):
             sdwa_r += (std_r[i,j]/std_r_sum)*mean_r
             sdwa_g += (std_g[i,j]/std_g_sum)*mean_g
             sdwa_b += (std_b[i,j]/std_b_sum)*mean_b
-    sdwa_avg = (sdwa_r+sdwa_g+sdwa_b)/3
+    sdwa_avg = (sdwa_r+sdwa_g+sdwa_b)/3.0
     gain_r = sdwa_avg/sdwa_r
     gain_g = sdwa_avg/sdwa_g
     gain_b = sdwa_avg/sdwa_b
@@ -142,6 +144,25 @@ def standard_deviation_weighted_grey_world(nimg,subwidth=20,subheight=20):
     nimg[0] = np.minimum(nimg[0]*gain_r,255)
     nimg[1] = np.minimum(nimg[1]*gain_g,255)
     nimg[2] = np.minimum(nimg[2]*gain_b,255)
+    return nimg.transpose(1, 2, 0).astype(np.uint8)
+
+def standard_deviation_weighted_grey_world(nimg,subwidth=20,subheight=20):
+    nimg = nimg.transpose(2, 0, 1)
+    nimg = np.ascontiguousarray(nimg,dtype=np.uint8)
+    img = RGBImage(nimg.shape[2],
+                   nimg.shape[1],
+                   nimg[0].ctypes.data_as(POINTER(c_ubyte)),
+                   nimg[1].ctypes.data_as(POINTER(c_ubyte)),
+                   nimg[2].ctypes.data_as(POINTER(c_ubyte)))
+    gains = c_double*3
+    ret = libcutil.calc_sdwgw(pointer(img),subwidth,subheight)
+    gains = np.ctypeslib.as_array(gains.from_address(ret))
+    gains = gains.copy()
+    libcutil.delete_doubleptr(ret)
+    nimg =  nimg.astype(np.uint32)
+    nimg[0] = np.minimum(nimg[0]*gains[0],255)
+    nimg[1] = np.minimum(nimg[1]*gains[1],255)
+    nimg[2] = np.minimum(nimg[2]*gains[2],255)
     return nimg.transpose(1, 2, 0).astype(np.uint8)
 
 def standard_deviation_and_luminance_weighted_gray_world(nimg,subwidth=20,subheight=20):

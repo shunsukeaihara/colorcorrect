@@ -11,6 +11,7 @@ extern "C"{
     unsigned char *b;
   } rgbimage_t;
 
+  double* calc_sdwgw(rgbimage_t* img, int subwidth, int subheight);
   double* calc_sdlwgw(rgbimage_t* img, int subwidth, int subheight);
   double* calc_lwgw(rgbimage_t* img, int subwidth, int subheight);
   void calc_ace(rgbimage_t* img, int samples, double slope, double limit);
