@@ -2,8 +2,12 @@
 #include <vector>
 #include <math.h>
 #include <cfloat>
+#include <time.h>
+#include <map>
 
 typedef std::vector<double> doubleary;
+typedef std::pair<int,int> intpair;
+typedef std::vector<intpair> coordary;
 
 typedef struct {
   doubleary *rary;
@@ -26,7 +30,6 @@ typedef struct {
   double bmin;
 } rscore_t;
 
-
 double calc_luminance(unsigned char r,unsigned b, unsigned g);
 double triangular_function(double luminance);
 std_t* calc_standard_deviation(rgbimage_t* img,int subwidth, int subheight, double subblocksize);
@@ -41,10 +44,12 @@ double calc_manhattan(int ax, int ay, int bx, int by);
 double calc_maximum(int ax, int ay, int bx, int by);
 double calc_saturation(int diff,double slope,double limit);
 unsigned char linear_scaling(double r, double max, double min);
+unsigned char linear_scaling2(double r, double max, double min);
 int get_pixel(unsigned char* ary,rgbimage_t* img, int x, int y);
 void set_pixel(unsigned char* ary,rgbimage_t* img, int x, int y,unsigned char c);
 rscore_t* create_rscore(rgbimage_t* img);
 void delete_rsocre(rscore_t* rs,rgbimage_t* img);
+coordary create_random_pair(int size, int x,int y);
 
 double* calc_sdlwgw(rgbimage_t* img, int subwidth, int subheight){
   double* gains = new double[3]();
@@ -103,9 +108,10 @@ double* calc_lwgw(rgbimage_t* img, int subwidth, int subheight){
   return gains;
 }
 
-void calc_ace(rgbimage_t* img,double slope, double limit){
+void calc_ace(rgbimage_t* img,int samples,double slope, double limit){
 
   rscore_t* rs = create_rscore(img);
+  coordary cary = create_random_pair(samples,img->width,img->height);
   //Chromatic/Spatial Adjustment
   for(int i=0;i<img->height;++i){
     for(int j=0;j<img->width;++j){
@@ -115,20 +121,27 @@ void calc_ace(rgbimage_t* img,double slope, double limit){
       double r_rscore_sum = 0.0;
       double g_rscore_sum = 0.0;
       double b_rscore_sum = 0.0;
+      double denominator = 0.0;
       //calcurate r score from whole image
       //if you want accelerate the computation, use neighborhood pixels or random sampling insted of whole image.
-      for(int k=0;k<img->height;++k){
-        for(int l=0;l<img->width;++l){
-          if(k==i&&l==j)continue;
-          double dist = calc_euclidean(j,i,l,k);
-          double r_rscore = calc_saturation(r_pixel - get_pixel(img->r,img,l,k),slope,limit);
-          double g_rscore = calc_saturation(g_pixel - get_pixel(img->g,img,l,k),slope,limit);
-          double b_rscore = calc_saturation(b_pixel - get_pixel(img->b,img,l,k),slope,limit);
-          r_rscore_sum += r_rscore/dist;
-          g_rscore_sum += g_rscore/dist;
-          b_rscore_sum += b_rscore/dist;
+      for(coordary::iterator it = cary.begin();it!=cary.end();it++){
+        int l = it->first;
+        int k = it->second;
+        //if(k==i&&l==j)continue;
+        if(k<i+100&&k>i-100){
+          if(l<j+100&&l>j-100){
+            continue;
+          }
         }
+        double dist = calc_euclidean(j,i,l,k);
+        r_rscore_sum += calc_saturation(r_pixel - get_pixel(img->r,img,l,k),slope,limit)/dist;
+        g_rscore_sum += calc_saturation(g_pixel - get_pixel(img->g,img,l,k),slope,limit)/dist;
+        b_rscore_sum += calc_saturation(b_pixel - get_pixel(img->b,img,l,k),slope,limit)/dist;
+        denominator += limit/dist;
       }
+      r_rscore_sum = r_rscore_sum/denominator;
+      g_rscore_sum = g_rscore_sum/denominator;
+      b_rscore_sum = b_rscore_sum/denominator;
       rs->rary[j][i]=r_rscore_sum;
       rs->gary[j][i]=g_rscore_sum;
       rs->bary[j][i]=b_rscore_sum;
@@ -352,6 +365,24 @@ void set_pixel(unsigned char* ary,rgbimage_t* img, int x, int y,unsigned char c)
 
 
 unsigned char linear_scaling(double r, double max, double min){
-  double slope = (max - min)/255.0;
+  double slope = 255.0/(max - min);
   return (unsigned char)((r-min)*slope);
+}
+
+unsigned char linear_scaling2(double r, double max, double min){
+  double slope = max/127.5;
+  return (unsigned char) (r*slope+127.5);
+}
+
+
+coordary create_random_pair(int size, int x,int y){
+  coordary ret;
+  srand((unsigned) time(NULL));
+  for(int i=0;i<size;++i){
+    int ranx = rand()%x;
+    int rany = rand()%y;
+    ret.push_back(intpair(ranx,rany));
+  }
+
+  return ret;
 }
