@@ -46,7 +46,7 @@ impement algorithms::
              usage: image,subblock width(default:20), subblock height(default:20)
     automatic color equalization
               colorcorrect.algorithm.automatic_color_equalization
-              usage: image,slope(default:10),limit(default:10000)
+              usage: image,slope(default:10),limit(default:1000)
 
 sample usage::
 
