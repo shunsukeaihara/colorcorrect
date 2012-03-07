@@ -130,9 +130,9 @@ double* calc_lwgw(rgbimage_t* img, int subwidth, int subheight){
 }
 
 void calc_ace(rgbimage_t* img,int samples,double slope, double limit){
-
-  rscore_t* rs = create_rscore(img);
+  srand((unsigned) time(NULL));
   coordary cary = create_random_pair(samples,img->width,img->height);
+  rscore_t* rs = create_rscore(img);
   //Chromatic/Spatial Adjustment
   for(int i=0;i<img->height;++i){
     for(int j=0;j<img->width;++j){
@@ -149,12 +149,15 @@ void calc_ace(rgbimage_t* img,int samples,double slope, double limit){
         int l = it->first;
         int k = it->second;
         //if(k==i&&l==j)continue;
-        if(k<i+100&&k>i-100){
-          if(l<j+100&&l>j-100){
+        /*
+        if(k<i+(img->height/5)&&k>i-(img->height/5)){
+          if(l<j+(img->width/5)&&l>j-(img->width/5)){
             continue;
           }
         }
+        */
         double dist = calc_euclidean(j,i,l,k);
+        if(dist<img->height/5)continue;
         r_rscore_sum += calc_saturation(r_pixel - get_pixel(img->r,img,l,k),slope,limit)/dist;
         g_rscore_sum += calc_saturation(g_pixel - get_pixel(img->g,img,l,k),slope,limit)/dist;
         b_rscore_sum += calc_saturation(b_pixel - get_pixel(img->b,img,l,k),slope,limit)/dist;
@@ -407,7 +410,6 @@ unsigned char linear_scaling2(double r, double max, double min){
 
 coordary create_random_pair(int size, int x,int y){
   coordary ret;
-  srand((unsigned) time(NULL));
   for(int i=0;i<size;++i){
     int ranx = rand()%x;
     int rany = rand()%y;

@@ -211,7 +211,7 @@ def luminance_weighted_gray_world(nimg,subwidth=20,subheight=20):
     nimg[2] = np.minimum(nimg[2]*gains[2],255)
     return nimg.transpose(1, 2, 0).astype(np.uint8)
 
-def automatic_color_equalization(nimg,slope=10,limit=1000):
+def automatic_color_equalization(nimg,slope=10,limit=1000,samples=500):
     nimg = nimg.transpose(2, 0, 1)
     nimg = np.ascontiguousarray(nimg,dtype=np.uint8)
     img = RGBImage(nimg.shape[2],
@@ -219,5 +219,5 @@ def automatic_color_equalization(nimg,slope=10,limit=1000):
                    nimg[0].ctypes.data_as(POINTER(c_ubyte)),
                    nimg[1].ctypes.data_as(POINTER(c_ubyte)),
                    nimg[2].ctypes.data_as(POINTER(c_ubyte)))
-    libcutil.calc_ace(pointer(img),100,slope,limit)
+    libcutil.calc_ace(pointer(img),samples,slope,limit)
     return nimg.transpose(1, 2, 0)
