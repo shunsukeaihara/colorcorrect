@@ -212,6 +212,9 @@ def luminance_weighted_gray_world(nimg,subwidth=20,subheight=20):
     return nimg.transpose(1, 2, 0).astype(np.uint8)
 
 def automatic_color_equalization(nimg,slope=10,limit=1000,samples=500):
+    """
+        A. Rizzi, C. Gatta and D. Marini, "A new algorithm for unsupervised global and local color correction.", Pattern Recognition Letters, vol. 24, no. 11, 2003.
+    """
     nimg = nimg.transpose(2, 0, 1)
     nimg = np.ascontiguousarray(nimg,dtype=np.uint8)
     img = RGBImage(nimg.shape[2],

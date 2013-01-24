@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 from setuptools import setup,Extension
 import sys
 sys.path.append('./src')
@@ -12,7 +13,7 @@ setup(name='colorcorrect',
       keywords=('image-processing computer-vision'),
       author='Shunsuke Aihara',
       author_email='s.aihara@gmail.com',
-      url='http://www.bitbucket.org/ynil/colorcorrect',
+      url='http://www.bitbucket.org/aihara/colorcorrect',
       license='MIT License',
       package_dir={'': 'src'},
       packages=['colorcorrect'],
