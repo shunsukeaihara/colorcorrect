@@ -1,23 +1,27 @@
 colorcorrect
 by Shunsuke Aihara - http://argmax.jp
 
-date:
+date::
+
     February 2012
 
-description:
+description::
+
     Imprement some of color correction algorithms
 
 require::
+
     python2.6 or later
     numpy
     PIL
-    python-opencv2.2 or later
 
 install::
+
     % python setup.py build
     % python setup.py install
 
 impement algorithms::
+
     gray world
          colorcorrect.algorithm.gray_world
          usage: image
@@ -47,6 +51,7 @@ impement algorithms::
               usage: image,slope(default:10),limit(default:1000)
 
 sample usage::
+
     >>> import Image
     >>> import colorcorrect.algorithm as cca
     >>> from colorcorrect.util import from_pil, to_pil
@@ -54,6 +59,7 @@ sample usage::
     >>> to_pil(cca.stretch(from_pil(img))).show()
 
 References::
+
     Denis. Nikitenko, M. Wirth and K. Trudel, "Applicability Of White-Balancing Algorithms to Restoring Faded Colour Slides: An Empirical Evaluation.", Journal of Multimedia, vol. 3, no. 5, 2008.
     HK. Lam, OC. Au and CW. Wong, "Automatic white balancing using luminance component and standard deviation of RGB components", in Proc. ICASSP, 2004.
     A. Rizzi, C. Gatta and D. Marini, "A new algorithm for unsupervised global and local color correction.", Pattern Recognition Letters, vol. 24, no. 11, 2003.

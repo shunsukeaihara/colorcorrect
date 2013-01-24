@@ -12,7 +12,7 @@ if __name__=="__main__":
     to_pil(retinex(from_pil(img))).show()
     to_pil(max_white(from_pil(img))).show()
     to_pil(retinex_adjust(retinex(from_pil(img)))).show()
-    to_pil(standard_deviation_weighted_grey_world(from_pil(img),16,16)).show()
+    to_pil(standard_deviation_weighted_grey_world(from_pil(img),20,20)).show()
     to_pil(standard_deviation_and_luminance_weighted_gray_world(from_pil(img),20,20)).show()
     to_pil(luminance_weighted_gray_world(from_pil(img),20,20)).show()
     to_pil(automatic_color_equalization(from_pil(img),10,1000,500)).show()
