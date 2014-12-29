@@ -88,13 +88,13 @@ def retinex_adjust(nimg):
     coefficient = np.linalg.solve(np.array([[sum_r2,sum_r],[max_r2,max_r]]),
                                   np.array([sum_g,max_g]))
     nimg[0] = np.minimum((nimg[0]**2)*coefficient[0] + nimg[0]*coefficient[1],255)
-    sum_b = np.sum(nimg[1])
-    sum_b2 = np.sum(nimg[1]**2)
-    max_b = nimg[1].max()
-    max_b2 = max_r**2
+    sum_b = np.sum(nimg[2])
+    sum_b2 = np.sum(nimg[2]**2)
+    max_b = nimg[2].max()
+    max_b2 = max_b**2
     coefficient = np.minimum(np.linalg.solve(np.array([[sum_b2,sum_b],[max_b2,max_b]]),
                                              np.array([sum_g,max_g])),255)
-    nimg[1] = (nimg[1]**2)*coefficient[0] + nimg[1]*coefficient[1]
+    nimg[2] = (nimg[2]**2)*coefficient[0] + nimg[2]*coefficient[1]
     return nimg.transpose(1, 2, 0).astype(np.uint8)
 
 def retinex_with_adjust(nimg):
