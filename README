@@ -13,7 +13,7 @@ require::
 
     python2.6 or later
     numpy
-    PIL
+    Pillow
 
 install::
 
