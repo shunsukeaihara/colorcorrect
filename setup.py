@@ -27,6 +27,5 @@ setup(name='colorcorrect',
               extra_compile_args=[],
           ),
       ],
-      install_requires=["numpy","PIL"],
-      test_suite = 'test_colorcorrect.suite'
+      install_requires=["numpy","Pillow"],
       )

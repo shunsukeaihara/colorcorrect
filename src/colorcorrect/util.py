@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 import numpy as np
-import Image
+from PIL import Image
 
 
 def from_pil(pimg):

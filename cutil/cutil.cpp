@@ -4,6 +4,7 @@
 #include <cfloat>
 #include <time.h>
 #include <map>
+#include <stdio.h>
 
 typedef std::vector<double> doubleary;
 typedef std::pair<int,int> intpair;
@@ -57,14 +58,14 @@ coordary create_random_pair(int size, int x,int y);
 double* calc_sdwgw(rgbimage_t* img, int subwidth, int subheight){
   double* gains = new double[3]();
   double* sdlwa = new double[3]();
-  double subblocksize = subwidth*subheight;
+  double subblocksize = (img->width / subwidth ) * (img->height / subheight);
   std_t* stdev = calc_standard_deviation(img,subwidth,subheight,subblocksize);
-
-  for(int i=0;i<subblocksize;++i){
+  for(int i=0;i<int(subblocksize);++i){
     sdlwa[0] += (stdev->rary->at(i)/stdev->rsum)*stdev->ravgary->at(i);
     sdlwa[1] += (stdev->gary->at(i)/stdev->gsum)*stdev->gavgary->at(i);
     sdlwa[2] += (stdev->bary->at(i)/stdev->bsum)*stdev->bavgary->at(i);
   }
+  delete_std(stdev);
   double sdlwa_avg = (sdlwa[0]+sdlwa[1]+sdlwa[2])/3.0;
   gains[0] = sdlwa_avg/sdlwa[0];
   gains[1] = sdlwa_avg/sdlwa[1];
@@ -370,11 +371,11 @@ double calc_inverse_exponential(int ax, int ay, int bx, int by,double alpha){
 
 
 double calc_manhattan(int ax, int ay, int bx, int by){
-  return (double)(fabs(ax-bx)+fabs(ay-by));
+  return (double)(abs(ax-bx)+abs(ay-by));
 }
 
 double calc_maximum(int ax, int ay, int bx, int by){
-  return ((fabs(ax-bx)>fabs(ay-by))? fabs(ax-bx):fabs(ay-by));
+  return ((abs(ax-bx)>abs(ay-by))? abs(ax-bx):abs(ay-by));
 }
 
 double calc_saturation(int diff,double slope,double limit){
