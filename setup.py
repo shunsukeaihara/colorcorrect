@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
-from setuptools import setup,Extension
+from setuptools import setup, Extension
 import sys
 sys.path.append('./src')
 sys.path.append('./test')
-version = file('VERSION').read().strip()
+version = open('VERSION').read().strip()
 
 setup(name='colorcorrect',
       version=version,
       description="imprement some of color correction algorithms",
-      long_description=file('README').read(),
+      long_description=open('README').read(),
       classifiers=[],
       keywords=('image-processing computer-vision'),
       author='Shunsuke Aihara',
@@ -27,5 +27,5 @@ setup(name='colorcorrect',
               extra_compile_args=[],
           ),
       ],
-      install_requires=["numpy","Pillow"],
+      install_requires=["numpy", "Pillow"],
       )
