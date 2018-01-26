@@ -7,6 +7,7 @@ from ctypes import c_ubyte
 from ctypes import c_int
 from ctypes import c_double
 from ctypes import c_void_p
+from six.moves import range
 
 import os
 cutilfolder = os.path.abspath(__file__).rsplit(os.path.sep, 1)[0]
@@ -22,6 +23,7 @@ class RGBImage(Structure):
         ("g", POINTER(c_ubyte)),
         ("b", POINTER(c_ubyte)),
     ]
+
 
 libcutil.calc_sdwgw.argtypes = [POINTER(RGBImage), c_int, c_int]
 libcutil.calc_sdwgw.restype = c_void_p
@@ -122,8 +124,8 @@ def standard_deviation_weighted_grey_world_python(nimg, subwidth=20, subheight=2
     std_r_sum = 0.0
     std_g_sum = 0.0
     std_b_sum = 0.0
-    for i in xrange(y):
-        for j in xrange(x):
+    for i in range(y):
+        for j in range(x):
             subblock = blocks[i, j]
             subb = subblock.transpose(2, 0, 1)
             std_r[i, j] = np.std(subb[0])

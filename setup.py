@@ -5,7 +5,7 @@ sys.path.append('./src')
 sys.path.append('./test')
 version = open('VERSION').read().strip()
 
-setup(name='colorcorrect-owkin',
+setup(name='colorcorrect',
       version=version,
       description="imprement some of color correction algorithms",
       long_description=open('README').read(),
@@ -27,5 +27,5 @@ setup(name='colorcorrect-owkin',
               extra_compile_args=[],
           ),
       ],
-      install_requires=["numpy", "Pillow"],
+      install_requires=["numpy", "Pillow", "six"],
       )
