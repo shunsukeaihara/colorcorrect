@@ -5,7 +5,7 @@ sys.path.append('./src')
 sys.path.append('./test')
 version = open('VERSION').read().strip()
 
-setup(name='colorcorrect',
+setup(name='colorcorrect-owkin',
       version=version,
       description="imprement some of color correction algorithms",
       long_description=open('README').read(),
