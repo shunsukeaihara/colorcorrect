@@ -28,4 +28,5 @@ setup(name='colorcorrect',
           ),
       ],
       install_requires=["numpy", "Pillow", "six"],
+      test_requires=["nose"]
       )
