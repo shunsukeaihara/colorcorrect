@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+from __future__ import division
 import numpy as np
 from ctypes import POINTER
 from ctypes import pointer
@@ -8,6 +9,7 @@ from ctypes import c_int
 from ctypes import c_double
 from ctypes import c_void_p
 from six.moves import range
+from six.moves import xrange
 
 import os
 cutilfolder = os.path.abspath(__file__).rsplit(os.path.sep, 1)[0]
@@ -115,7 +117,7 @@ def standard_deviation_weighted_grey_world_python(nimg, subwidth=20, subheight=2
     nimg = nimg.astype(np.uint32)
     height, width, ch = nimg.shape
     strides = nimg.itemsize * np.array([width * subheight, subwidth, width, 3, 1])
-    shape = (height / subheight, width / subwidth, subheight, subwidth, 3)
+    shape = (height // subheight, width // subwidth, subheight, subwidth, 3)
     blocks = np.lib.stride_tricks.as_strided(nimg, shape=shape, strides=strides)
     y, x = blocks.shape[:2]
     std_r = np.zeros([y, x], dtype=np.float16)
