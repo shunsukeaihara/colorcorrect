@@ -1,9 +1,14 @@
 # -*- coding: utf-8 -*-
+import os
 from setuptools import setup, Extension
 import sys
 sys.path.append('./src')
 sys.path.append('./test')
 version = open('VERSION').read().strip()
+
+libs = []
+if os.name == 'posix':
+    libs.append('m')
 
 setup(name='colorcorrect',
       version=version,
@@ -23,7 +28,7 @@ setup(name='colorcorrect',
                   'cutil/cutil.cpp',
               ],
               include_dirs=['cutil'],
-              libraries=['m'],
+              libraries=libs,
               extra_compile_args=[],
           ),
       ],

@@ -5,8 +5,7 @@ from PIL import Image
 
 def from_pil(pimg):
     pimg = pimg.convert(mode='RGB')
-    nimg = np.asarray(pimg)
-    nimg.flags.writeable = True
+    nimg = np.array(pimg)
     return nimg
 
 
