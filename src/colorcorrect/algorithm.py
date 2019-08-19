@@ -64,7 +64,7 @@ def max_white(nimg):
     elif nimg.dtype == np.uint32:
         brightest = float(2 ** 32)
     else:
-        brightest == float(2 ** 8)
+        brightest = float(2 ** 8)
     nimg = nimg.transpose(2, 0, 1)
     nimg = nimg.astype(np.int32)
     nimg[0] = np.minimum(nimg[0] * (brightest / float(nimg[0].max())), 255)
