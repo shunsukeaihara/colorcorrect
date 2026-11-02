@@ -1,12 +1,13 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "colorcorrect"
 description = "Implementation of some color correction / automatic white balance algorithms"
 readme = {file = "README", content-type = "text/x-rst"}
-license = {file = "LICENSE"}
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{name = "Shunsuke Aihara", email = "s.aihara@gmail.com"}]
 keywords = ["image-processing", "computer-vision", "white-balance", "color-correction"]
 requires-python = ">=3.10"
@@ -16,7 +17,6 @@ dependencies = [
 ]
 dynamic = ["version"]
 classifiers = [
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: C++",
     "Topic :: Multimedia :: Graphics",
@@ -32,3 +32,12 @@ packages = ["colorcorrect"]
 
 [tool.setuptools.dynamic]
 version = {file = "VERSION"}
+
+[tool.cibuildwheel]
+build = "cp310-* cp311-* cp312-* cp313-* cp314-*"
+skip = "pp* *-musllinux_i686 *-win32 *-manylinux_i686"
+test-sources = ["test"]
+test-command = "python -m unittest discover -s test -p \"*_test.py\""
+
+[tool.cibuildwheel.macos]
+archs = ["universal2"]
