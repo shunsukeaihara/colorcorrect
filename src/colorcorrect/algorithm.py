@@ -42,6 +42,7 @@ libcutil.calc_lwgw.argtypes = [POINTER(RGBImage), c_int, c_int]
 libcutil.calc_lwgw.restype = c_void_p
 libcutil.delete_doubleptr.argtypes = [c_void_p]
 libcutil.calc_ace.argtypes = [POINTER(RGBImage), c_int, c_double, c_double, c_uint, c_double]
+libcutil.calc_rsr.argtypes = [POINTER(RGBImage), POINTER(RGBImage), c_int, c_int, c_double, c_uint, c_int]
 
 
 # ---------------------------------------------------------------------------
@@ -459,4 +460,282 @@ def automatic_color_equalization(nimg, slope=10, limit=1000, samples=500,
                            levels, seed, workers, min_distance)[0].astype(np.float64)
     ratio = luma_ace / np.maximum(luma, 1.0)
     out = np.clip(np.rint(planes.astype(np.float64) * ratio[None]), 0, 255).astype(np.uint8)
+    return _to_image(out)
+
+
+# ---------------------------------------------------------------------------
+# illuminant estimation: Minkowski norm family (Shades of Gray / Grey Edge)
+# ---------------------------------------------------------------------------
+def _gaussian_kernels(sigma):
+    """1-D Gaussian and its first two derivatives, truncated at 3 sigma."""
+    r = int(np.ceil(3.0 * sigma))
+    x = np.arange(-r, r + 1, dtype=np.float64)
+    g = np.exp(-x * x / (2.0 * sigma * sigma))
+    g /= g.sum()
+    g1 = -x / (sigma * sigma) * g
+    g2 = (x * x / sigma ** 4 - 1.0 / (sigma * sigma)) * g
+    return g, g1, g2
+
+
+def _convolve_separable(f, ky, kx):
+    """2-D convolution with separable kernels and reflected borders."""
+    ry, rx = len(ky) // 2, len(kx) // 2
+    padded = np.pad(f, ((ry, ry), (rx, rx)), mode="reflect")
+    tmp = np.apply_along_axis(np.convolve, 0, padded, ky[::-1], mode="valid")
+    return np.apply_along_axis(np.convolve, 1, tmp, kx[::-1], mode="valid")
+
+
+def _dilate(mask, radius):
+    """Binary dilation with a (2r+1)x(2r+1) square."""
+    if radius <= 0:
+        return mask
+    out = mask.copy()
+    for axis in (0, 1):
+        acc = out.copy()
+        for k in range(1, radius + 1):
+            acc |= np.roll(out, k, axis=axis)
+            acc |= np.roll(out, -k, axis=axis)
+        out = acc
+    return out
+
+
+def _minkowski_norm(values, p):
+    """(mean |v|^p)^(1/p); p=None or inf gives the maximum."""
+    values = np.abs(values)
+    if values.size == 0:
+        return 1.0
+    if p is None or np.isinf(p):
+        return float(values.max())
+    if p == 1:
+        return float(values.mean())
+    scale = values.max()
+    if scale <= 0:
+        return 0.0
+    return float(scale * np.power(np.mean(np.power(values / scale, p)), 1.0 / p))
+
+
+def _gains_from_illuminant(e):
+    """Gains that map the estimated illuminant onto its G component."""
+    e = np.asarray(e, dtype=np.float64)
+    if e[1] <= 0:
+        return np.ones(3)
+    return np.array([_safe_ratio(e[1], e[0]), 1.0, _safe_ratio(e[1], e[2])])
+
+
+def _valid_mask(nimg, saturation_threshold, dilate=0):
+    """Pixels that are not clipped in any channel (optionally dilated)."""
+    if saturation_threshold is None:
+        return np.ones(nimg.shape[:2], dtype=bool)
+    saturated = nimg.max(axis=2) >= saturation_threshold
+    return ~_dilate(saturated, dilate)
+
+
+def estimate_illuminant_grey_edge(nimg, order=1, p=6, sigma=2.0, saturation_threshold=255):
+    """
+    Illuminant colour estimate of the general grey world framework
+
+        e_c  proportional to  ( mean | d^n/dx^n  (G_sigma * I_c) |^p )^(1/p)
+
+    order=0 is Shades of Gray (and grey world for p=1, max-RGB for p=inf),
+    order=1 / 2 are first / second order Grey Edge.  Returns an array (3,).
+    """
+    f = np.asarray(nimg).astype(np.float64)
+    if f.ndim != 3 or f.shape[2] != 3:
+        raise ValueError("expected an (height, width, 3) RGB array")
+    if order not in (0, 1, 2):
+        raise ValueError("order must be 0, 1 or 2")
+    if order > 0 and sigma <= 0:
+        raise ValueError("derivatives need sigma > 0")
+    radius = int(np.ceil(3.0 * sigma)) if sigma > 0 else 0
+    mask = _valid_mask(np.asarray(nimg), saturation_threshold, dilate=radius if order > 0 else 0)
+    if order > 0 and radius > 0:
+        # derivatives next to the border are dominated by the padding
+        border = np.zeros_like(mask)
+        border[radius:-radius or None, radius:-radius or None] = True
+        mask &= border
+    if not mask.any():
+        mask = np.ones_like(mask)
+    e = np.empty(3)
+    if sigma > 0:
+        g, g1, g2 = _gaussian_kernels(sigma)
+    for c in range(3):
+        ch = f[..., c]
+        if order == 0:
+            resp = _convolve_separable(ch, g, g) if sigma > 0 else ch
+        elif order == 1:
+            gx = _convolve_separable(ch, g, g1)
+            gy = _convolve_separable(ch, g1, g)
+            resp = np.hypot(gx, gy)
+        else:
+            gxx = _convolve_separable(ch, g, g2)
+            gyy = _convolve_separable(ch, g2, g)
+            gxy = _convolve_separable(ch, g1, g1)
+            resp = np.sqrt(gxx * gxx + 4.0 * gxy * gxy + gyy * gyy)
+        e[c] = _minkowski_norm(resp[mask], p)
+    return e
+
+
+def shades_of_gray(nimg, p=6, saturation_threshold=255):
+    """
+    G. Finlayson and E. Trezzi, "Shades of Gray and Colour Constancy",
+    Color Imaging Conference, 2004.
+
+    Grey world with the mean replaced by a Minkowski p-norm: p=1 is grey
+    world, p=None (infinity) is max-RGB, p around 6 is the recommended value.
+    Pixels clipped at ``saturation_threshold`` are ignored (None: keep all).
+    """
+    nimg = np.asarray(nimg)
+    e = estimate_illuminant_grey_edge(nimg, order=0, p=p, sigma=0.0,
+                                      saturation_threshold=saturation_threshold)
+    return _apply_gains(nimg, _gains_from_illuminant(e))
+
+
+def grey_edge(nimg, order=1, p=6, sigma=2.0, saturation_threshold=255):
+    """
+    J. van de Weijer, T. Gevers and A. Gijsenij, "Edge-Based Color Constancy",
+    IEEE Trans. Image Processing 16(9), 2007.
+
+    The illuminant is estimated from the Minkowski p-norm of the Gaussian
+    derivatives (order 1 or 2, scale sigma) of each channel instead of the
+    pixel values.  order=0 gives the general grey world (Shades of Gray with
+    Gaussian smoothing).
+    """
+    nimg = np.asarray(nimg)
+    e = estimate_illuminant_grey_edge(nimg, order=order, p=p, sigma=sigma,
+                                      saturation_threshold=saturation_threshold)
+    return _apply_gains(nimg, _gains_from_illuminant(e))
+
+
+# ---------------------------------------------------------------------------
+# illuminant estimation: PCA of bright and dark pixels (Cheng et al. 2014)
+# ---------------------------------------------------------------------------
+def estimate_illuminant_pca(nimg, fraction=0.035, saturation_threshold=255):
+    """
+    D. Cheng, D. K. Prasad and M. S. Brown, "Illuminant estimation for color
+    constancy: why spatial-domain methods work and the role of the color
+    distribution", JOSA A 31(5), 2014.
+
+    Pixels are projected on the direction of the mean colour; the ``fraction``
+    most distant pixels on either side (the brightest and darkest along that
+    axis) are kept and the illuminant is the first principal component (no
+    centering) of their colours.  Returns an array (3,).
+    """
+    nimg = np.asarray(nimg)
+    f = nimg.reshape(-1, 3).astype(np.float64)
+    mask = _valid_mask(nimg, saturation_threshold).ravel()
+    if mask.any():
+        f = f[mask]
+    mean = f.mean(axis=0)
+    norm = np.linalg.norm(mean)
+    if norm <= 0:
+        return np.ones(3)
+    proj = (f - mean) @ (mean / norm)
+    k = max(int(round(len(f) * fraction)), 1)
+    order = np.argsort(proj)
+    sel = f[np.concatenate([order[:k], order[-k:]])]
+    _, _, vt = np.linalg.svd(sel, full_matrices=False)
+    e = np.abs(vt[0])
+    return e if e.sum() > 0 else np.ones(3)
+
+
+def pca_color_constancy(nimg, fraction=0.035, saturation_threshold=255):
+    """White balance with the PCA based illuminant estimate of Cheng et al. 2014."""
+    nimg = np.asarray(nimg)
+    e = estimate_illuminant_pca(nimg, fraction=fraction, saturation_threshold=saturation_threshold)
+    return _apply_gains(nimg, _gains_from_illuminant(e))
+
+
+# ---------------------------------------------------------------------------
+# multi scale retinex (with colour restoration)
+# ---------------------------------------------------------------------------
+def _gaussian_blur_fft(f, sigma):
+    """Gaussian blur of a 2-D array with symmetric (mirrored) borders via FFT."""
+    h, w = f.shape
+    ph, pw = _fast_len(2 * h), _fast_len(2 * w)
+    padded = np.pad(f, ((0, ph - h), (0, pw - w)), mode="symmetric")
+    yy = np.minimum(np.arange(ph), ph - np.arange(ph)).astype(np.float64)
+    xx = np.minimum(np.arange(pw), pw - np.arange(pw)).astype(np.float64)
+    kernel = np.exp(-(yy[:, None] ** 2 + xx[None, :] ** 2) / (2.0 * sigma * sigma))
+    kernel /= kernel.sum()
+    return np.fft.irfft2(np.fft.rfft2(padded) * np.fft.rfft2(kernel), s=(ph, pw))[:h, :w]
+
+
+def _simplest_color_balance(f, clip):
+    """Clip ``clip`` of the pixels at each end of every channel and stretch to [0, 255]."""
+    out = np.empty(f.shape, dtype=np.uint8)
+    for c in range(f.shape[2]):
+        ch = f[..., c]
+        lo, hi = np.percentile(ch, [100.0 * clip, 100.0 * (1.0 - clip)])
+        if hi - lo <= 0:
+            out[..., c] = np.clip(np.rint(ch), 0, 255)
+        else:
+            out[..., c] = np.clip(np.rint((ch - lo) * (255.0 / (hi - lo))), 0, 255)
+    return out
+
+
+def multi_scale_retinex(nimg, sigmas=(15, 80, 250), color_restoration=True,
+                        alpha=125.0, beta=46.0, clip=0.01):
+    """
+    D. Jobson, Z. Rahman and G. Woodell, "A multiscale retinex for bridging the
+    gap between color images and the human observation of scenes", IEEE Trans.
+    Image Processing 6(7), 1997 (MSR / MSRCR), with the output scaling of
+    A. Petro, C. Sbert and J.-M. Morel, "Multiscale Retinex", IPOL 2014.
+
+    R_c = mean_k [ log I_c - log(G_sigma_k * I_c) ]
+    MSRCR_c = beta * [ log(alpha I_c) - log(I_r + I_g + I_b) ] * R_c   (color_restoration)
+
+    followed by the "simplest color balance": ``clip`` of the pixels at both
+    ends of each channel are saturated and the rest stretched to [0, 255].
+    """
+    if not sigmas:
+        raise ValueError("at least one scale is needed")
+    if not 0 <= clip < 0.5:
+        raise ValueError("clip must be in [0, 0.5)")
+    f = np.asarray(nimg).astype(np.float64) + 1.0  # avoid log(0)
+    if f.ndim != 3 or f.shape[2] != 3:
+        raise ValueError("expected an (height, width, 3) RGB array")
+    log_f = np.log(f)
+    jobs = [(c, float(sigma)) for sigma in sigmas for c in range(3)]
+
+    def blurred_log(job):
+        c, sigma = job
+        return np.log(_gaussian_blur_fft(f[..., c], sigma) + 1.0)
+
+    # numpy's FFT releases the GIL, so the blurs run in parallel
+    with ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 1)) as pool:
+        results = list(pool.map(blurred_log, jobs))
+    msr = np.zeros_like(f)
+    for (c, _), blurred in zip(jobs, results):
+        msr[..., c] += log_f[..., c] - blurred
+    msr /= len(sigmas)
+    if color_restoration:
+        restoration = beta * (np.log(alpha * f) - np.log(f.sum(axis=2, keepdims=True)))
+        msr *= restoration
+    return _simplest_color_balance(msr, clip)
+
+
+# ---------------------------------------------------------------------------
+# random spray retinex (Provenzi et al. 2007)
+# ---------------------------------------------------------------------------
+def random_spray_retinex(nimg, sprays=10, points=250, radius=None, seed=None, workers=None):
+    """
+    E. Provenzi, M. Fierro, A. Rizzi, L. De Carli, D. Gadia and D. Marini,
+    "Random Spray Retinex", IEEE Trans. Image Processing 16(1), 2007.
+
+    For every pixel ``sprays`` random sprays of ``points`` pixels are drawn
+    around it with radial density 1/r up to ``radius`` (None: the image
+    diagonal); the lightness is the average over the sprays of the pixel value
+    divided by the maximum of the spray (per channel).  Cost grows with
+    sprays * points * pixels; ``seed`` makes the result reproducible and
+    ``workers`` sets the number of threads (None: all cores).
+    """
+    if sprays <= 0 or points <= 0:
+        raise ValueError("sprays and points must be positive")
+    planes = _planes(nimg)
+    out = np.empty_like(planes)
+    if seed is None:
+        seed = int(np.random.randint(0, 2 ** 32, dtype=np.uint64))
+    libcutil.calc_rsr(pointer(_rgbimage(planes)), pointer(_rgbimage(out)), int(sprays), int(points),
+                      float(radius) if radius else 0.0, c_uint(int(seed) & 0xFFFFFFFF),
+                      int(workers) if workers else 0)
     return _to_image(out)

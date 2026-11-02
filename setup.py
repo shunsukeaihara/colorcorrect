@@ -8,13 +8,19 @@ import os
 from setuptools import setup, Extension
 from setuptools.command.build_ext import build_ext
 
-EXPORTED = ["calc_sdwgw", "calc_sdlwgw", "calc_lwgw", "calc_ace", "delete_doubleptr"]
+EXPORTED = ["calc_sdwgw", "calc_sdlwgw", "calc_lwgw", "calc_ace", "calc_rsr", "delete_doubleptr"]
+
+import sys
 
 libs = []
 compile_args = []
+link_args = []
 if os.name == 'posix':
     libs.append('m')
     compile_args = ['-O3', '-std=c++11']
+    if not sys.platform.startswith('darwin'):
+        compile_args.append('-pthread')
+        link_args.append('-pthread')
 
 
 class win_build_ext(build_ext):
@@ -46,6 +52,7 @@ setup(
             include_dirs=['cutil'],
             libraries=libs,
             extra_compile_args=compile_args,
+            extra_link_args=link_args,
         ),
     ],
     cmdclass={"build_ext": get_build_ext()},

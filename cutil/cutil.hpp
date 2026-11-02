@@ -23,6 +23,13 @@ extern "C"{
   void calc_ace(rgbimage_t* img, int samples, double slope, double limit,
                 unsigned int seed, double min_distance);
   void delete_doubleptr(double* p);
+  /* Random Spray Retinex: for every pixel `sprays` random sprays of `points`
+     pixels with radial density 1/r (radius `radius`) are drawn; the output
+     is the mean over sprays of I_c(x) / max of I_c over the spray, scaled to
+     [0, 255].  `in` is read, `out` written (same size).  threads <= 0 uses
+     the hardware concurrency. */
+  void calc_rsr(const rgbimage_t* in, rgbimage_t* out, int sprays, int points,
+                double radius, unsigned int seed, int threads);
 }
 
 #endif

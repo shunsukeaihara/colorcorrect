@@ -4,6 +4,7 @@
 #include <cfloat>
 #include <random>
 #include <algorithm>
+#include <thread>
 
 /*
  * Block based grey world variants from
@@ -242,4 +243,100 @@ void calc_ace(rgbimage_t* img, int samples, double slope, double limit,
       ch[c][p] = (unsigned char)v;
     }
   }
+}
+
+/*
+ * Random Spray Retinex
+ *   E. Provenzi, M. Fierro, A. Rizzi, L. De Carli, D. Gadia, D. Marini,
+ *   "Random Spray Retinex", IEEE Trans. Image Processing 16(1), 2007.
+ *
+ * The Retinex paths are replaced by "sprays": for a target pixel x, n points
+ * are drawn around it with a radial density proportional to 1/r (r uniform
+ * in [0, R], angle uniform), points falling outside the image are discarded.
+ * The lightness of x for one spray is I_c(x) / max_{j in spray} I_c(j); the
+ * final value is the average over N sprays.
+ *
+ * Offsets are drawn from a large precomputed pool (one random start index per
+ * pixel and spray) so that every pixel still gets its own sprays without
+ * paying for a trigonometric RNG per point.
+ */
+namespace {
+
+struct RsrOffsets {
+  std::vector<int> dx, dy;
+};
+
+void rsr_rows(const rgbimage_t* in, rgbimage_t* out, int y0, int y1,
+              int sprays, int points, const RsrOffsets& pool,
+              unsigned int seed) {
+  const int W = in->width, H = in->height;
+  const unsigned char* ich[3] = {in->r, in->g, in->b};
+  unsigned char* och[3] = {out->r, out->g, out->b};
+  const size_t pool_size = pool.dx.size();
+  for (int y = y0; y < y1; ++y) {
+    // one generator per row so the result does not depend on the threading
+    std::mt19937 rng(seed + unsigned(y));
+    for (int x = 0; x < W; ++x) {
+      const size_t p = size_t(y) * W + x;
+      double acc[3] = {0.0, 0.0, 0.0};
+      for (int s = 0; s < sprays; ++s) {
+        size_t idx = rng() % pool_size;
+        // the pixel itself always belongs to its spray
+        unsigned char mx[3] = {ich[0][p], ich[1][p], ich[2][p]};
+        for (int k = 0; k < points; ++k) {
+          const int xx = x + pool.dx[idx], yy = y + pool.dy[idx];
+          if (++idx == pool_size) idx = 0;
+          if (xx < 0 || xx >= W || yy < 0 || yy >= H) continue;
+          const size_t q = size_t(yy) * W + xx;
+          for (int c = 0; c < 3; ++c) mx[c] = std::max(mx[c], ich[c][q]);
+        }
+        for (int c = 0; c < 3; ++c)
+          acc[c] += mx[c] > 0 ? double(ich[c][p]) / double(mx[c]) : 1.0;
+      }
+      for (int c = 0; c < 3; ++c) {
+        double v = acc[c] / sprays * 255.0 + 0.5;
+        if (v > 255.0) v = 255.0;
+        och[c][p] = (unsigned char)v;
+      }
+    }
+  }
+}
+
+}  // namespace
+
+void calc_rsr(const rgbimage_t* in, rgbimage_t* out, int sprays, int points,
+              double radius, unsigned int seed, int threads) {
+  const int W = in->width, H = in->height;
+  if (W <= 0 || H <= 0 || sprays <= 0 || points <= 0) return;
+  if (radius <= 0.0) radius = sqrt(double(W) * W + double(H) * H);
+
+  // pool of spray offsets with radial density 1/r
+  std::mt19937 rng(seed);
+  std::uniform_real_distribution<double> uni(0.0, 1.0);
+  const size_t pool_size = std::max<size_t>(size_t(points) * 64, 1u << 16);
+  RsrOffsets pool;
+  pool.dx.resize(pool_size);
+  pool.dy.resize(pool_size);
+  const double two_pi = 6.283185307179586;
+  for (size_t i = 0; i < pool_size; ++i) {
+    const double r = radius * uni(rng);
+    const double t = two_pi * uni(rng);
+    pool.dx[i] = int(floor(r * cos(t) + 0.5));
+    pool.dy[i] = int(floor(r * sin(t) + 0.5));
+  }
+
+  if (threads <= 0) threads = int(std::thread::hardware_concurrency());
+  if (threads <= 0) threads = 1;
+  threads = std::min(threads, H);
+  if (threads == 1) {
+    rsr_rows(in, out, 0, H, sprays, points, pool, seed + 1);
+    return;
+  }
+  std::vector<std::thread> pool_threads;
+  for (int t = 0; t < threads; ++t) {
+    const int y0 = int(size_t(H) * t / threads), y1 = int(size_t(H) * (t + 1) / threads);
+    pool_threads.emplace_back(rsr_rows, in, out, y0, y1, sprays, points,
+                              std::cref(pool), seed + 1);
+  }
+  for (auto& th : pool_threads) th.join();
 }

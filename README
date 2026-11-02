@@ -74,8 +74,37 @@ impement algorithms::
 
               >>> cca.automatic_color_equalization(cca.retinex_with_adjust(img), preserve_chroma=True)
 
+    shades of gray
+              colorcorrect.algorithm.shades_of_gray
+              usage: image,p(default:6),saturation_threshold(default:255)
+              Minkowski p-norm grey world (p=1 grey world, p=None max-RGB)
+    grey edge
+              colorcorrect.algorithm.grey_edge
+              usage: image,order(default:1),p(default:6),sigma(default:2.0),saturation_threshold(default:255)
+              illuminant from the p-norm of Gaussian derivatives of order 1 or 2;
+              order=0 is the general grey world (Shades of Gray with smoothing).
+              estimate_illuminant_grey_edge returns the estimate itself.
+    pca color constancy
+              colorcorrect.algorithm.pca_color_constancy
+              usage: image,fraction(default:0.035),saturation_threshold(default:255)
+              Cheng et al. 2014: PCA of the brightest/darkest pixels along the mean colour.
+              estimate_illuminant_pca returns the estimate itself.
+    multi scale retinex (MSR / MSRCR)
+              colorcorrect.algorithm.multi_scale_retinex
+              usage: image,sigmas(default:(15,80,250)),color_restoration(default:True),
+                     alpha(default:125),beta(default:46),clip(default:0.01)
+              Jobson et al. 1997 with the simplest colour balance output scaling of
+              the IPOL implementation (Petro, Sbert, Morel 2014).
+    random spray retinex
+              colorcorrect.algorithm.random_spray_retinex
+              usage: image,sprays(default:10),points(default:250),radius(default:None),
+                     seed(default:None),workers(default:None)
+              Provenzi et al. 2007; cost grows with sprays*points*pixels (C++, threaded).
+
 All functions take and return (height, width, 3) uint8 numpy arrays and never
-modify their input.
+modify their input.  The illuminant estimation methods (grey world, shades of
+gray, grey edge, PCA) assume a diagonal (von Kries) colour cast and keep G as
+the reference channel.
 
 sample usage::
 
@@ -92,3 +121,9 @@ References::
     E. Lam, "Combining gray world and retinex theory for automatic white balance in digital photography", in Proc. ISCE, 2005.
     A. Rizzi, C. Gatta and D. Marini, "A new algorithm for unsupervised global and local color correction.", Pattern Recognition Letters, vol. 24, no. 11, 2003.
     P. Getreuer, "Automatic Color Enhancement (ACE) and its Fast Implementation", Image Processing On Line, 2012. (FFT evaluation of ACE)
+    G. Finlayson and E. Trezzi, "Shades of Gray and Colour Constancy", Color Imaging Conference, 2004.
+    J. van de Weijer, T. Gevers and A. Gijsenij, "Edge-Based Color Constancy", IEEE Trans. Image Processing, vol. 16, no. 9, 2007.
+    D. Cheng, D. K. Prasad and M. S. Brown, "Illuminant estimation for color constancy: why spatial-domain methods work and the role of the color distribution", JOSA A, vol. 31, no. 5, 2014.
+    D. Jobson, Z. Rahman and G. Woodell, "A multiscale retinex for bridging the gap between color images and the human observation of scenes", IEEE Trans. Image Processing, vol. 6, no. 7, 1997.
+    A. Petro, C. Sbert and J.-M. Morel, "Multiscale Retinex", Image Processing On Line, 2014.
+    E. Provenzi, M. Fierro, A. Rizzi, L. De Carli, D. Gadia and D. Marini, "Random Spray Retinex", IEEE Trans. Image Processing, vol. 16, no. 1, 2007.

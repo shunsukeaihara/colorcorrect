@@ -24,6 +24,21 @@ ALL_ALGORITHMS = [
     cca.luminance_weighted_gray_world,
     cca.luminance_weighted_gray_world_python,
     cca.automatic_color_equalization,
+    cca.shades_of_gray,
+    cca.grey_edge,
+    cca.pca_color_constancy,
+    cca.multi_scale_retinex,
+    cca.random_spray_retinex,
+]
+
+ILLUMINANT_ESTIMATORS = [
+    cca.shades_of_gray,
+    lambda img: cca.shades_of_gray(img, p=1),
+    lambda img: cca.shades_of_gray(img, p=None),
+    lambda img: cca.grey_edge(img, order=0, sigma=2),
+    lambda img: cca.grey_edge(img, order=1),
+    lambda img: cca.grey_edge(img, order=2),
+    cca.pca_color_constancy,
 ]
 
 
@@ -233,3 +248,84 @@ class CCTestCase(TestCase):
         self.assertTrue((out.max(axis=0) == 255).all())
         self.assertTrue((out.min(axis=0) == 0).all())
         self.assertLess(np.ptp(out.mean(axis=0)), 2.0)
+
+
+class NewAlgorithmsTestCase(TestCase):
+    def setUp(self):
+        self.img = from_pil(Image.open(TEST_IMAGE))
+        self.rng = np.random.default_rng(99)
+        # a textured grey scene with a diagonal (von Kries) colour cast
+        grey = np.asarray(Image.fromarray(self.img).resize((160, 120), Image.BILINEAR)).astype(np.float64).mean(axis=2)
+        grey = 20 + grey * (200.0 / 255.0)
+        self.scene = grey
+        self.cast = np.clip(np.stack([grey * 1.3, grey, grey * 0.7], axis=-1), 0, 255).astype(np.uint8)
+
+    def test_illuminant_estimators_remove_diagonal_cast(self):
+        for i, func in enumerate(ILLUMINANT_ESTIMATORS):
+            out = func(self.cast).reshape(-1, 3).mean(axis=0)
+            self.assertLess(np.ptp(out), 1.0, "estimator %d" % i)
+            # G is the reference channel and stays untouched
+            self.assertAlmostEqual(out[1], self.cast.reshape(-1, 3)[:, 1].mean(), places=5)
+
+    def test_illuminant_estimates_scale_with_the_cast(self):
+        # the estimate of the cast image must be the estimate of the neutral
+        # scene multiplied by the cast
+        neutral = np.clip(np.stack([self.scene] * 3, axis=-1), 0, 255).astype(np.uint8)
+        for kw in (dict(order=0, sigma=0), dict(order=0, sigma=2), dict(order=1), dict(order=2)):
+            e_cast = cca.estimate_illuminant_grey_edge(self.cast, **kw)
+            e_neutral = cca.estimate_illuminant_grey_edge(neutral, **kw)
+            ratio = e_cast / e_neutral
+            np.testing.assert_allclose(ratio / ratio[1], [1.3, 1.0, 0.7], rtol=0.01)
+        e = cca.estimate_illuminant_pca(self.cast)
+        np.testing.assert_allclose(e / e[1], [1.3, 1.0, 0.7], rtol=0.01)
+
+    def test_shades_of_gray_limits(self):
+        img = self.rng.integers(0, 256, (40, 50, 3), dtype=np.uint8)
+        np.testing.assert_array_equal(cca.shades_of_gray(img, p=1, saturation_threshold=None), cca.grey_world(img))
+        e = cca.estimate_illuminant_grey_edge(img, order=0, p=None, sigma=0, saturation_threshold=None)
+        np.testing.assert_array_equal(e, img.reshape(-1, 3).max(axis=0))
+
+    def test_saturated_pixels_are_ignored(self):
+        img = self.cast.copy()
+        img[:10, :10] = 255  # a clipped white patch must not bias the estimate
+        e_masked = cca.estimate_illuminant_grey_edge(img, order=0, sigma=0, p=6)
+        e_all = cca.estimate_illuminant_grey_edge(img, order=0, sigma=0, p=6, saturation_threshold=None)
+        e_ref = cca.estimate_illuminant_grey_edge(self.cast, order=0, sigma=0, p=6)
+        self.assertLess(np.abs(e_masked / e_masked[1] - e_ref / e_ref[1]).max(),
+                        np.abs(e_all / e_all[1] - e_ref / e_ref[1]).max())
+
+    def test_grey_edge_arguments(self):
+        with self.assertRaises(ValueError):
+            cca.grey_edge(self.cast, order=3)
+        with self.assertRaises(ValueError):
+            cca.grey_edge(self.cast, order=1, sigma=0)
+
+    def test_multi_scale_retinex(self):
+        out = cca.multi_scale_retinex(self.img)
+        self.assertEqual(out.shape, self.img.shape)
+        self.assertEqual(out.dtype, np.uint8)
+        flat = out.reshape(-1, 3)
+        # simplest colour balance uses the full range of every channel
+        self.assertTrue((flat.max(axis=0) == 255).all())
+        self.assertTrue((flat.min(axis=0) == 0).all())
+        # plain MSR on a grey image stays grey
+        grey = np.clip(np.stack([self.scene] * 3, axis=-1), 0, 255).astype(np.uint8)
+        msr = cca.multi_scale_retinex(grey, color_restoration=False).astype(int)
+        self.assertEqual(np.abs(msr[..., 0] - msr[..., 1]).max(), 0)
+        with self.assertRaises(ValueError):
+            cca.multi_scale_retinex(self.img, sigmas=())
+
+    def test_random_spray_retinex(self):
+        img = np.asarray(Image.fromarray(self.img).resize((80, 60), Image.BILINEAR))
+        a = cca.random_spray_retinex(img, seed=5, sprays=4, points=50)
+        b = cca.random_spray_retinex(img, seed=5, sprays=4, points=50, workers=1)
+        self.assertTrue(np.array_equal(a, b))
+        c = cca.random_spray_retinex(img, seed=6, sprays=4, points=50)
+        self.assertFalse(np.array_equal(a, c))
+        # a uniform image is its own white patch
+        flat = np.full((20, 30, 3), 77, dtype=np.uint8)
+        self.assertTrue((cca.random_spray_retinex(flat, seed=1) == 255).all())
+        # the output never exceeds the ratio to the global maximum of a channel
+        self.assertTrue((a.astype(int) >= img.astype(int) * 255 // max(int(img.max()), 1) - 1).all())
+        with self.assertRaises(ValueError):
+            cca.random_spray_retinex(img, sprays=0)
