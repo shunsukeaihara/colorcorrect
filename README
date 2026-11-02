@@ -57,14 +57,22 @@ impement algorithms::
     automatic color equalization
               colorcorrect.algorithm.automatic_color_equalization
               usage: image,slope(default:10),limit(default:1000),samples(default:500),
-                     method(default:"fft"),levels(default:16),seed(default:None),workers(default:None)
+                     method(default:"fft"),levels(default:16),seed(default:None),workers(default:None),
+                     min_distance(default:None),preserve_chroma(default:False)
               method="fft" evaluates the full image sum of the paper with FFT
               convolutions (exact up to the interpolation over `levels` grey
               levels, deterministic, multi-threaded).  method="sampling" is the
               Monte-Carlo C++ implementation comparing every pixel with
-              `samples` random pixels; pass `seed` for reproducible output.
+              `samples` random pixels; pass `seed` for reproducible output and
+              `min_distance` (default: half the mean sample spacing) to keep a
+              sample right next to a pixel from dominating it.
               The saturation function is r(x) = clip(slope*x, -limit, limit) on
-              pixel differences in [-255, 255].
+              pixel differences in [-255, 255]; only slope/limit matters.
+              preserve_chroma=True runs ACE on the luminance only and keeps the
+              colour of every pixel (an extension of the paper); combined with
+              retinex_with_adjust it adds local contrast without desaturating:
+
+              >>> cca.automatic_color_equalization(cca.retinex_with_adjust(img), preserve_chroma=True)
 
 All functions take and return (height, width, 3) uint8 numpy arrays and never
 modify their input.

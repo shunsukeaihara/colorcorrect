@@ -153,11 +153,14 @@ void delete_doubleptr(double* p) {
  * so that R_c(p) lies in [-1, 1] whatever the sample set is.
  * The full sum is O(N^2); this implementation evaluates it on a random subset
  * of `samples` pixels shared by every target pixel (one of the speed-ups
- * suggested in the paper).  Dynamic tone reproduction scaling then stretches
+ * suggested in the paper).  With a sparse subset a sample lying right next
+ * to a pixel would dominate its sum (1/d is huge) and leave a visible blotch
+ * around every sample point, so the distance is clamped from below to
+ * `min_distance`.  Dynamic tone reproduction scaling then stretches
  * [min R_c, max R_c] linearly to [0, 255].
  */
 void calc_ace(rgbimage_t* img, int samples, double slope, double limit,
-              unsigned int seed) {
+              unsigned int seed, double min_distance) {
   const int W = img->width, H = img->height;
   const size_t N = size_t(W) * size_t(H);
   if (N == 0 || samples <= 0) return;
@@ -168,10 +171,12 @@ void calc_ace(rgbimage_t* img, int samples, double slope, double limit,
   std::vector<int> sv[3];
   for (int c = 0; c < 3; ++c) sv[c].resize(samples);
   unsigned char* ch[3] = {img->r, img->g, img->b};
+  // a luminance-only call passes the same plane three times; compute it once
+  const int nch = (img->g == img->r && img->b == img->r) ? 1 : 3;
   for (int s = 0; s < samples; ++s) {
     sx[s] = int(rng() % (unsigned int)W);
     sy[s] = int(rng() % (unsigned int)H);
-    for (int c = 0; c < 3; ++c) sv[c][s] = ch[c][sy[s] * W + sx[s]];
+    for (int c = 0; c < nch; ++c) sv[c][s] = ch[c][sy[s] * W + sx[s]];
   }
 
   // saturation function as a lookup table over the difference -255..255,
@@ -190,23 +195,25 @@ void calc_ace(rgbimage_t* img, int samples, double slope, double limit,
   double rmin[3] = {DBL_MAX, DBL_MAX, DBL_MAX};
 
   std::vector<float> invd(samples);
+  const float min_d2 = float(min_distance > 0.0 ? min_distance * min_distance : 0.0);
   for (int y = 0; y < H; ++y) {
     for (int x = 0; x < W; ++x) {
       const size_t p = size_t(y) * W + x;
-      // 1/d(p, j) for every sample; the pixel itself (d = 0) is excluded
+      // 1/max(d(p, j), min_distance) for every sample; the pixel itself
+      // (d = 0) is excluded
       double denom = 0.0;
       for (int s = 0; s < samples; ++s) {
         const int dx = x - sx[s], dy = y - sy[s];
         const int d2 = dx * dx + dy * dy;
-        const float w = d2 > 0 ? 1.0f / sqrtf(float(d2)) : 0.0f;
+        const float w = d2 > 0 ? 1.0f / sqrtf(std::max(float(d2), min_d2)) : 0.0f;
         invd[s] = w;
         denom += w;
       }
       if (denom <= 0.0) {  // every sample is this very pixel
-        for (int c = 0; c < 3; ++c) score[c][p] = 0.0f;
+        for (int c = 0; c < nch; ++c) score[c][p] = 0.0f;
         continue;
       }
-      for (int c = 0; c < 3; ++c) {
+      for (int c = 0; c < nch; ++c) {
         const int v = ch[c][p];
         const int* vals = &sv[c][0];
         double acc = 0.0;
@@ -220,7 +227,7 @@ void calc_ace(rgbimage_t* img, int samples, double slope, double limit,
   }
 
   // dynamic tone reproduction scaling: [min, max] -> [0, 255]
-  for (int c = 0; c < 3; ++c) {
+  for (int c = 0; c < nch; ++c) {
     const double range = rmax[c] - rmin[c];
     if (range <= 0.0) {
       // flat channel: no contrast to stretch, map to middle grey

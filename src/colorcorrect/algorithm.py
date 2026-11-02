@@ -41,7 +41,7 @@ libcutil.calc_sdlwgw.restype = c_void_p
 libcutil.calc_lwgw.argtypes = [POINTER(RGBImage), c_int, c_int]
 libcutil.calc_lwgw.restype = c_void_p
 libcutil.delete_doubleptr.argtypes = [c_void_p]
-libcutil.calc_ace.argtypes = [POINTER(RGBImage), c_int, c_double, c_double, c_uint]
+libcutil.calc_ace.argtypes = [POINTER(RGBImage), c_int, c_double, c_double, c_uint, c_double]
 
 
 # ---------------------------------------------------------------------------
@@ -311,7 +311,7 @@ def _ace_fft(planes, slope, limit, levels, workers=None):
     pixel's own value, in the spirit of Getreuer's fast ACE (IPOL 2012).
     numpy's FFT releases the GIL, so the convolutions run in a thread pool.
     """
-    _, h, w = planes.shape
+    h, w = planes.shape[1:]
     ph, pw = _fast_len(2 * h - 1), _fast_len(2 * w - 1)
     # circular 1/d kernel; the padding guarantees a linear convolution
     dy = np.arange(ph)
@@ -352,9 +352,9 @@ def _ace_fft(planes, slope, limit, levels, workers=None):
 
     if workers is None:
         workers = min(8, os.cpu_count() or 1)
-    channels = [planes[c].astype(np.int64) for c in range(3)]
-    jobs = [(channels[c], k, c) for c in range(3) for k in range(levels)]
-    scores = np.zeros((3, h, w))
+    channels = [plane.astype(np.int64) for plane in planes]
+    jobs = [(channels[c], k, c) for c in range(len(channels)) for k in range(levels)]
+    scores = np.zeros((len(channels), h, w))
     if workers > 1:
         with ThreadPoolExecutor(max_workers=workers) as pool:
             terms = pool.map(level_term, jobs)
@@ -383,15 +383,51 @@ def _ace_scale(scores):
     return out
 
 
+def _luminance_plane(planes):
+    """(3, H, W) uint8 -> (H, W) float64 BT.601 luma."""
+    f = planes.astype(np.float64)
+    return 0.299 * f[0] + 0.587 * f[1] + 0.114 * f[2]
+
+
+def _ace_planes(planes, slope, limit, samples, method, levels, seed, workers, min_distance):
+    """Run ACE on a (n, H, W) uint8 stack of planes, return (n, H, W) uint8."""
+    if method == "fft":
+        if levels < 2:
+            raise ValueError("levels must be at least 2")
+        return _ace_scale(_ace_fft(planes, float(slope), float(limit), int(levels), workers))
+    elif method == "sampling":
+        if samples <= 0:
+            raise ValueError("samples must be positive")
+        if seed is None:
+            seed = int(np.random.randint(0, 2 ** 32, dtype=np.uint64))
+        if min_distance is None:
+            # half the mean spacing between random samples
+            min_distance = 0.5 * np.sqrt(planes.shape[1] * planes.shape[2] / float(samples))
+        work = np.ascontiguousarray(planes)
+        if work.shape[0] == 3:
+            image = _rgbimage(work)
+        else:
+            # luminance-only call: hand the same plane to r, g and b; the C
+            # code detects the aliasing and processes it once
+            plane = work[0].ctypes.data_as(POINTER(c_ubyte))
+            image = RGBImage(work.shape[2], work.shape[1], plane, plane, plane)
+        libcutil.calc_ace(pointer(image), int(samples), float(slope), float(limit),
+                          c_uint(int(seed) & 0xFFFFFFFF), float(min_distance))
+        return work
+    raise ValueError("unknown method %r (expected 'fft' or 'sampling')" % (method,))
+
+
 def automatic_color_equalization(nimg, slope=10, limit=1000, samples=500,
-                                 method="fft", levels=16, seed=None, workers=None):
+                                 method="fft", levels=16, seed=None, workers=None,
+                                 min_distance=None, preserve_chroma=False):
     """
     A. Rizzi, C. Gatta and D. Marini, "A new algorithm for unsupervised global
     and local color correction.", Pattern Recognition Letters, vol. 24, no. 11, 2003.
 
     slope, limit: saturation function r(x) = clip(slope * x, -limit, limit)
         applied to pixel differences in [-255, 255]; the default saturates
-        for differences larger than 100 levels.
+        for differences larger than 100 levels.  Only the ratio slope/limit
+        matters.
     method: "fft" (default) evaluates the full image sum exactly (up to the
         interpolation over ``levels`` grey levels) with FFT convolutions and
         is deterministic.  "sampling" is the Monte-Carlo C implementation that
@@ -401,21 +437,26 @@ def automatic_color_equalization(nimg, slope=10, limit=1000, samples=500,
         convolution (16 keeps the result within one grey level of the exact
         sum on test images; 256 is exact).
     workers: threads used by the "fft" method (None: up to 8 CPU cores).
+    min_distance: "sampling" only.  Distances shorter than this are clamped
+        so that a sample right next to a pixel cannot dominate it, which
+        otherwise leaves a blotch around every sample point.  None: half the
+        mean spacing between samples, sqrt(H*W/samples)/2.  0 disables it.
+    preserve_chroma: run ACE on the luminance only and rescale the RGB
+        triplet by the luminance change, keeping the colour of every pixel.
+        Useful after a global white balance (e.g. retinex_with_adjust) to add
+        ACE's local contrast without the desaturation of the per channel
+        stretch.  This is an extension, not part of the paper.
     """
     if slope <= 0 or limit <= 0:
         raise ValueError("slope and limit must be positive")
     planes = _planes(nimg)
-    if method == "fft":
-        if levels < 2:
-            raise ValueError("levels must be at least 2")
-        scores = _ace_fft(planes, float(slope), float(limit), int(levels), workers)
-        return _to_image(_ace_scale(scores))
-    elif method == "sampling":
-        if samples <= 0:
-            raise ValueError("samples must be positive")
-        if seed is None:
-            seed = int(np.random.randint(0, 2 ** 32, dtype=np.uint64))
-        libcutil.calc_ace(pointer(_rgbimage(planes)), int(samples), float(slope),
-                          float(limit), c_uint(int(seed) & 0xFFFFFFFF))
-        return _to_image(planes)
-    raise ValueError("unknown method %r (expected 'fft' or 'sampling')" % (method,))
+    if not preserve_chroma:
+        out = _ace_planes(planes, slope, limit, samples, method, levels, seed, workers, min_distance)
+        return _to_image(out)
+    luma = _luminance_plane(planes)
+    luma8 = np.clip(np.rint(luma), 0, 255).astype(np.uint8)[None]
+    luma_ace = _ace_planes(np.ascontiguousarray(luma8), slope, limit, samples, method,
+                           levels, seed, workers, min_distance)[0].astype(np.float64)
+    ratio = luma_ace / np.maximum(luma, 1.0)
+    out = np.clip(np.rint(planes.astype(np.float64) * ratio[None]), 0, 255).astype(np.uint8)
+    return _to_image(out)

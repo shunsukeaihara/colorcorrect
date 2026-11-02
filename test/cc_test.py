@@ -196,6 +196,37 @@ class CCTestCase(TestCase):
         with self.assertRaises(ValueError):
             cca.automatic_color_equalization(img, method="nope")
 
+    def test_ace_min_distance_removes_sample_blotches(self):
+        img = np.asarray(Image.fromarray(self.img).resize((160, 120), Image.BILINEAR))
+        exact = cca.automatic_color_equalization(img).astype(int)
+        raw = cca.automatic_color_equalization(img, method="sampling", seed=3, samples=200,
+                                               min_distance=0).astype(int)
+        clamped = cca.automatic_color_equalization(img, method="sampling", seed=3, samples=200).astype(int)
+        # clamping the distance makes the Monte-Carlo estimate closer to the
+        # exact sum and removes the worst outliers around the sample points
+        self.assertLess(np.abs(clamped - exact).mean(), np.abs(raw - exact).mean())
+        self.assertLess(np.abs(clamped - exact).max(), np.abs(raw - exact).max())
+
+    def test_ace_preserve_chroma(self):
+        img = np.asarray(Image.fromarray(self.img).resize((64, 48), Image.BILINEAR))
+        for method in ("fft", "sampling"):
+            out = cca.automatic_color_equalization(img, method=method, seed=1, preserve_chroma=True)
+            self.assertEqual(out.shape, img.shape)
+            self.assertEqual(out.dtype, np.uint8)
+            # the RGB ratios (hue) of bright, unclipped pixels are unchanged
+            f_in = img.astype(np.float64)
+            f_out = out.astype(np.float64)
+            mask = (img.min(axis=2) > 30) & (out.max(axis=2) < 250)
+            ratio_in = f_in[mask] / f_in[mask].sum(axis=1, keepdims=True)
+            ratio_out = f_out[mask] / f_out[mask].sum(axis=1, keepdims=True)
+            self.assertLess(np.abs(ratio_in - ratio_out).max(), 0.02)
+            # and the luminance is what ACE on the luminance alone gives
+            luma = cca._luminance_plane(cca._planes(img))
+            luma8 = np.clip(np.rint(luma), 0, 255).astype(np.uint8)[None]
+            luma_ace = cca._ace_planes(np.ascontiguousarray(luma8), 10, 1000, 500, method, 16, 1, None, None)[0]
+            out_luma = cca._luminance_plane(cca._planes(out))
+            self.assertLess(np.abs(out_luma[mask] - luma_ace[mask].astype(np.float64)).mean(), 1.5)
+
     def test_ace_increases_contrast_and_removes_cast(self):
         img = cast_image(self.rng, shape=(40, 60))
         out = cca.automatic_color_equalization(img).reshape(-1, 3)

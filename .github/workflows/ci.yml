@@ -5,6 +5,11 @@ on:
     branches: [master]
   pull_request:
 
+# a new push to the same branch/PR supersedes the run still in the queue
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     name: test (${{ matrix.os }}, py${{ matrix.python-version }})
@@ -14,6 +19,10 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         python-version: ["3.10", "3.13"]
+        exclude:
+          # macOS runners are the scarce ones; one Python version is enough there
+          - os: macos-latest
+            python-version: "3.10"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
