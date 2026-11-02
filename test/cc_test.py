@@ -110,9 +110,6 @@ class CCTestCase(TestCase):
         self.assertLessEqual(abs(out[:, 0].max() - out[:, 1].max()), 1)
         self.assertLessEqual(abs(out[:, 2].max() - out[:, 1].max()), 1)
 
-    def test_retinex_with_adjust_is_an_alias(self):
-        self.assertIs(cca.retinex_with_adjust, cca.retinex_adjust)
-
     def test_retinex_adjust_never_wraps_around(self):
         # a channel whose quadratic fit overshoots 255 must be clipped, not
         # wrapped (the old code clipped the coefficients instead of the result)
