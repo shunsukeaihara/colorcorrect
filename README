@@ -27,8 +27,6 @@ test::
     % pip install -e .
     % python -m unittest discover -s test -p "*_test.py"
 
-    or simply "tox".
-
 impement algorithms::
 
     gray world
