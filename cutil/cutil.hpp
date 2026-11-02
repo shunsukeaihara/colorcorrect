@@ -11,10 +11,15 @@ extern "C"{
     unsigned char *b;
   } rgbimage_t;
 
+  /* Each calc_* returns a heap allocated double[3] = {gain_r, gain_g, gain_b}
+     that must be released with delete_doubleptr(). */
   double* calc_sdwgw(rgbimage_t* img, int subwidth, int subheight);
   double* calc_sdlwgw(rgbimage_t* img, int subwidth, int subheight);
   double* calc_lwgw(rgbimage_t* img, int subwidth, int subheight);
-  void calc_ace(rgbimage_t* img, int samples, double slope, double limit);
+  /* Monte-Carlo ACE: samples random pixels (shared by every target pixel).
+     Overwrites img in place. seed selects the random subset. */
+  void calc_ace(rgbimage_t* img, int samples, double slope, double limit,
+                unsigned int seed);
   void delete_doubleptr(double* p);
 }
 

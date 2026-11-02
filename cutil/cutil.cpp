@@ -2,420 +2,237 @@
 #include <vector>
 #include <math.h>
 #include <cfloat>
-#include <time.h>
-#include <map>
-#include <stdio.h>
+#include <random>
+#include <algorithm>
 
-typedef std::vector<double> doubleary;
-typedef std::pair<int,int> intpair;
-typedef std::vector<intpair> coordary;
+/*
+ * Block based grey world variants from
+ *   H.K. Lam, O.C. Au, C.W. Wong, "Automatic white balancing using luminance
+ *   component and standard deviation of RGB components", ICASSP 2004.
+ *
+ * The image is split into sub-blocks of subwidth x subheight pixels.  Blocks
+ * on the right/bottom border may be smaller than requested; they are kept and
+ * weighted with their real pixel count instead of reading past the buffer.
+ *
+ * For every block i and channel c the block average mu_c(i) and the standard
+ * deviation sigma_c(i) are computed.  The standard deviation weighted average
+ *   SDWA_c = sum_i sigma_c(i) / sum_j sigma_c(j) * mu_c(i)
+ * replaces the plain image mean of the grey world algorithm, and the gains are
+ *   k_c = (SDWA_r + SDWA_g + SDWA_b) / 3 / SDWA_c.
+ * In the luminance weighted variants mu_c(i) is a luminance weighted mean of
+ * the block, using a triangular weighting function of the luminance Y.
+ */
 
-typedef struct {
-  doubleary *rary;
-  doubleary *gary;
-  doubleary *bary;
-  double rsum;
-  double gsum;
-  double bsum;
-  doubleary *ravgary;
-  doubleary *gavgary;
-  doubleary *bavgary;
-} std_t;
+namespace {
 
-typedef struct {
-  double **rary;
-  double **gary;
-  double **bary;
-  double rmax;
-  double gmax;
-  double bmax;
-  double rmin;
-  double gmin;
-  double bmin;
-} rscore_t;
+struct BlockStats {
+  std::vector<double> mean[3];  // block (weighted) means per channel
+  std::vector<double> std[3];   // block standard deviations per channel
+  double std_sum[3];
+  BlockStats() { std_sum[0] = std_sum[1] = std_sum[2] = 0.0; }
+};
 
-double calc_luminance(unsigned char r,unsigned char b, unsigned char g);
-double triangular_function(double luminance);
-std_t* calc_standard_deviation(rgbimage_t* img,int subwidth, int subheight, double subblocksize);
-double* calc_luminance_weight(rgbimage_t* img,std_t* stdev,int subwidth, int subheight, double subblocksize);
-std_t* create_std();
-void delete_std(std_t* p);
-double** new_2d_mat(rgbimage_t* img);
-void delete_2d_mat(double** mat,rgbimage_t* img);
-double calc_euclidean(int ax, int ay, int bx, int by);
-double calc_inverse_exponential(int ax, int ay, int bx, int by,double alpha);
-double calc_manhattan(int ax, int ay, int bx, int by);
-double calc_maximum(int ax, int ay, int bx, int by);
-double calc_saturation(int diff,double slope,double limit);
-unsigned char linear_scaling(double r, double max, double min);
-unsigned char linear_scaling2(double r, double max, double min);
-int get_pixel(unsigned char* ary,rgbimage_t* img, int x, int y);
-void set_pixel(unsigned char* ary,rgbimage_t* img, int x, int y,unsigned char c);
-rscore_t* create_rscore(rgbimage_t* img);
-void delete_rsocre(rscore_t* rs,rgbimage_t* img);
-coordary create_random_pair(int size, int x,int y);
+const double kLuminancePeak = 160.0;
 
-double* calc_sdwgw(rgbimage_t* img, int subwidth, int subheight){
-  double* gains = new double[3]();
-  double* sdlwa = new double[3]();
-  double subblocksize = (img->width / subwidth ) * (img->height / subheight);
-  std_t* stdev = calc_standard_deviation(img,subwidth,subheight,subblocksize);
-  for(int i=0;i<int(subblocksize);++i){
-    sdlwa[0] += (stdev->rary->at(i)/stdev->rsum)*stdev->ravgary->at(i);
-    sdlwa[1] += (stdev->gary->at(i)/stdev->gsum)*stdev->gavgary->at(i);
-    sdlwa[2] += (stdev->bary->at(i)/stdev->bsum)*stdev->bavgary->at(i);
-  }
-  delete_std(stdev);
-  double sdlwa_avg = (sdlwa[0]+sdlwa[1]+sdlwa[2])/3.0;
-  gains[0] = sdlwa_avg/sdlwa[0];
-  gains[1] = sdlwa_avg/sdlwa[1];
-  gains[2] = sdlwa_avg/sdlwa[2];
-  delete[] sdlwa;
-  return gains;
+inline double luminance(unsigned char r, unsigned char g, unsigned char b) {
+  // ITU-R BT.601 luma
+  return 0.298912 * r + 0.586611 * g + 0.114478 * b;
 }
 
-double* calc_sdlwgw(rgbimage_t* img, int subwidth, int subheight){
-  double* gains = new double[3]();
-  double subblocksize = subwidth*subheight;
-
-  std_t* stdev = calc_standard_deviation(img,subwidth,subheight,subblocksize);
-  double* sdlwa = calc_luminance_weight(img, stdev, subwidth, subheight, subblocksize);
-  delete_std(stdev);
-  double sdlwa_avg = (sdlwa[0]+sdlwa[1]+sdlwa[2])/3.0;
-  gains[0] = sdlwa_avg/sdlwa[0];
-  gains[1] = sdlwa_avg/sdlwa[1];
-  gains[2] = sdlwa_avg/sdlwa[2];
-  delete[] sdlwa;
-  return gains;
+// Triangular weighting function of the luminance with its peak at Y = 160
+// (Lam et al. 2004): zero weight for black, maximum at 160 and decreasing
+// again towards saturated (white) pixels.
+inline double triangular_weight(double y) {
+  if (y <= 0.0 || y >= 255.0) return 0.0;
+  if (y < kLuminancePeak) return y / kLuminancePeak;
+  return (255.0 - y) / (255.0 - kLuminancePeak);
 }
 
-double* calc_acasdl(rgbimage_t* img, int subwidth, int subheight){
-  double* gains = new double[3]();
-  double subblocksize = subwidth*subheight;
-
-  std_t* stdev = calc_standard_deviation(img,subwidth,subheight,subblocksize);
-  double* sdlwa = calc_luminance_weight(img, stdev, subwidth, subheight, subblocksize);
-  delete_std(stdev);
-  double sdlwa_avg = (sdlwa[0]+sdlwa[1]+sdlwa[2])/3.0;
-  gains[0] = sdlwa_avg/sdlwa[0];
-  gains[1] = sdlwa_avg/sdlwa[1];
-  gains[2] = sdlwa_avg/sdlwa[2];
-
-  gains[2] = gains[2] * (((sdlwa[0]+sdlwa[1])*0.5)/sdlwa[2]);
-  delete[] sdlwa;
-  return gains;
-}
-
-double* calc_lwgw(rgbimage_t* img, int subwidth, int subheight){
-  double* gains = new double[3]();
-  double subblocksize = subwidth*subheight;
-  std_t* stdev = create_std();
-  for(int i=0;i<img->height;i+=subheight){
-    for(int j=0;j<img->width;j+=subwidth){
-      stdev->rary->push_back(1.0);
-      stdev->gary->push_back(1.0);
-      stdev->bary->push_back(1.0);
-      stdev->rsum+=1.0;
-      stdev->gsum+=1.0;
-      stdev->bsum+=1.0;
-    }
-  }
-  double* lwa = calc_luminance_weight(img, stdev, subwidth, subheight, subblocksize);
-  delete_std(stdev);
-  double lwa_avg = (lwa[0]+lwa[1]+lwa[2])/3.0;
-  gains[0] = lwa_avg/lwa[0];
-  gains[1] = lwa_avg/lwa[1];
-  gains[2] = lwa_avg/lwa[2];
-  delete[] lwa;
-  return gains;
-}
-
-void calc_ace(rgbimage_t* img,int samples,double slope, double limit){
-  srand((unsigned) time(NULL));
-  coordary cary = create_random_pair(samples,img->width,img->height);
-  rscore_t* rs = create_rscore(img);
-  //Chromatic/Spatial Adjustment
-  for(int i=0;i<img->height;++i){
-    for(int j=0;j<img->width;++j){
-      int r_pixel = get_pixel(img->r,img,j,i);
-      int g_pixel = get_pixel(img->g,img,j,i);
-      int b_pixel = get_pixel(img->b,img,j,i);
-      double r_rscore_sum = 0.0;
-      double g_rscore_sum = 0.0;
-      double b_rscore_sum = 0.0;
-      double denominator = 0.0;
-      //calcurate r score from whole image
-      //if you want accelerate the computation, use neighborhood pixels or random sampling insted of whole image.
-      for(coordary::iterator it = cary.begin();it!=cary.end();it++){
-        int l = it->first;
-        int k = it->second;
-        //if(k==i&&l==j)continue;
-        /*
-        if(k<i+(img->height/5)&&k>i-(img->height/5)){
-          if(l<j+(img->width/5)&&l>j-(img->width/5)){
-            continue;
+// weighted: use the luminance weighted block mean instead of the plain mean
+// unit_std: use sigma = 1 for every block (luminance weighted grey world)
+BlockStats block_statistics(const rgbimage_t* img, int subwidth, int subheight,
+                            bool weighted, bool unit_std) {
+  BlockStats st;
+  const int W = img->width, H = img->height;
+  const unsigned char* ch[3] = {img->r, img->g, img->b};
+  for (int by = 0; by < H; by += subheight) {
+    const int y1 = std::min(by + subheight, H);
+    for (int bx = 0; bx < W; bx += subwidth) {
+      const int x1 = std::min(bx + subwidth, W);
+      const double n = double(y1 - by) * double(x1 - bx);
+      double sum[3] = {0, 0, 0}, wsum[3] = {0, 0, 0}, wtot = 0.0;
+      for (int y = by; y < y1; ++y) {
+        const int row = y * W;
+        for (int x = bx; x < x1; ++x) {
+          const unsigned char r = img->r[row + x];
+          const unsigned char g = img->g[row + x];
+          const unsigned char b = img->b[row + x];
+          sum[0] += r; sum[1] += g; sum[2] += b;
+          if (weighted) {
+            const double w = triangular_weight(luminance(r, g, b));
+            wtot += w;
+            wsum[0] += w * r; wsum[1] += w * g; wsum[2] += w * b;
           }
         }
-        */
-        double dist = calc_euclidean(j,i,l,k);
-        if(dist<img->height/5)continue;
-        r_rscore_sum += calc_saturation(r_pixel - get_pixel(img->r,img,l,k),slope,limit)/dist;
-        g_rscore_sum += calc_saturation(g_pixel - get_pixel(img->g,img,l,k),slope,limit)/dist;
-        b_rscore_sum += calc_saturation(b_pixel - get_pixel(img->b,img,l,k),slope,limit)/dist;
-        denominator += limit/dist;
       }
-      r_rscore_sum = r_rscore_sum/denominator;
-      g_rscore_sum = g_rscore_sum/denominator;
-      b_rscore_sum = b_rscore_sum/denominator;
-      rs->rary[j][i]=r_rscore_sum;
-      rs->gary[j][i]=g_rscore_sum;
-      rs->bary[j][i]=b_rscore_sum;
-      if(r_rscore_sum > rs->rmax)
-        rs->rmax = r_rscore_sum;
-      if(g_rscore_sum > rs->gmax)
-        rs->gmax = g_rscore_sum;
-      if(b_rscore_sum > rs->bmax)
-        rs->bmax = b_rscore_sum;
-      if(r_rscore_sum < rs->rmin)
-        rs->rmin = r_rscore_sum;
-      if(g_rscore_sum < rs->gmin)
-        rs->gmin = g_rscore_sum;
-      if(b_rscore_sum < rs->bmin)
-        rs->bmin = b_rscore_sum;
-    }
-  }
-
-  //Dynamic Tone Reproduction Scaling
-  for(int i=0;i<img->height;++i){
-    for(int j=0;j<img->width;++j){
-      //scaling
-      img->r[i*img->width+j]=linear_scaling(rs->rary[j][i],rs->rmax,rs->rmin);
-      img->g[i*img->width+j]=linear_scaling(rs->gary[j][i],rs->gmax,rs->gmin);
-      img->b[i*img->width+j]=linear_scaling(rs->bary[j][i],rs->bmax,rs->bmin);
-    }
-  }
-  delete_rsocre(rs,img);
-}
-
-std_t* calc_standard_deviation(rgbimage_t* img,int subwidth, int subheight, double subblocksize){
-  std_t* stdev = create_std();
-  //calurete standard deviation for each subblocks
-  for(int i=0;i<img->height;i+=subheight){
-    for(int j=0;j<img->width;j+=subwidth){
-      double avg_r=0;
-      double avg_g=0;
-      double avg_b=0;
-      //iterate pixels in subblock
-      for(int k=i;k<subheight+i;++k){
-        for(int l=j;l<subwidth+j;++l){
-          avg_r+=img->r[k*img->width+l];
-          avg_g+=img->g[k*img->width+l];
-          avg_b+=img->b[k*img->width+l];
+      double mean[3];
+      for (int c = 0; c < 3; ++c) {
+        mean[c] = sum[c] / n;
+        // a block without any weight (all black / all white) falls back to
+        // its plain mean instead of producing NaN
+        st.mean[c].push_back(weighted && wtot > 0.0 ? wsum[c] / wtot : mean[c]);
+      }
+      double sq[3] = {0, 0, 0};
+      if (!unit_std) {
+        for (int c = 0; c < 3; ++c) {
+          for (int y = by; y < y1; ++y) {
+            const int row = y * W;
+            for (int x = bx; x < x1; ++x) {
+              const double d = ch[c][row + x] - mean[c];
+              sq[c] += d * d;
+            }
+          }
         }
       }
-      avg_r = avg_r/subblocksize;
-      avg_g = avg_g/subblocksize;
-      avg_b = avg_b/subblocksize;
-      stdev->ravgary->push_back(avg_r);
-      stdev->gavgary->push_back(avg_g);
-      stdev->bavgary->push_back(avg_b);
-      double std_r=0.0;
-      double std_g=0.0;
-      double std_b=0.0;
-      //iterate pixels in subblock
-      for(int k=i;k<subheight+i;++k){
-        for(int l=j;l<subwidth+j;++l){
-          std_r+=pow(img->r[k*img->width+l]-avg_r,2.0);
-          std_g+=pow(img->g[k*img->width+l]-avg_g,2.0);
-          std_b+=pow(img->b[k*img->width+l]-avg_b,2.0);
-        }
+      for (int c = 0; c < 3; ++c) {
+        const double s = unit_std ? 1.0 : (n > 1.0 ? sqrt(sq[c] / (n - 1.0)) : 0.0);
+        st.std[c].push_back(s);
+        st.std_sum[c] += s;
       }
-      std_r = sqrt(std_r/(subblocksize-1.0));
-      std_g = sqrt(std_g/(subblocksize-1.0));
-      std_b = sqrt(std_b/(subblocksize-1.0));
-      stdev->rary->push_back(std_r);
-      stdev->gary->push_back(std_g);
-      stdev->bary->push_back(std_b);
-      stdev->rsum+=std_r;
-      stdev->gsum+=std_g;
-      stdev->bsum+=std_b;
     }
   }
-  return stdev;
+  return st;
 }
 
-double* calc_luminance_weight(rgbimage_t* img,std_t* stdev,int subwidth, int subheight, double subblocksize){
-  double* sdlwa = new double[3]();
-  int bid = 0;
-  for(int i=0;i<img->height;i+=subheight){
-    for(int j=0;j<img->width;j+=subwidth){
-      doubleary wlumi_Ary;
-      double wlumi_sum=0.0;
-      //iterate pixels in subblock
-      for(int k=i;k<subheight+i;++k){
-        for(int l=j;l<subwidth+j;++l){
-          unsigned char r=img->r[k*img->width+l];
-          unsigned char g=img->g[k*img->width+l];
-          unsigned char b=img->b[k*img->width+l];
-          double luminance = calc_luminance(r,g,b);
-          double w_luminance = triangular_function(luminance);
-          wlumi_sum+=w_luminance;
-          wlumi_Ary.push_back(w_luminance);
-        }
-      }
-      int subpid=0;
-      double lumi_r = 0;
-      double lumi_g = 0;
-      double lumi_b = 0;
-      //iterate pixels in subblock
-      for(int k=i;k<subheight+i;++k){
-        for(int l=j;l<subwidth+j;++l){
-          lumi_r += (wlumi_Ary[subpid]/wlumi_sum)*img->r[k*img->width+l];
-          lumi_g += (wlumi_Ary[subpid]/wlumi_sum)*img->g[k*img->width+l];
-          lumi_b += (wlumi_Ary[subpid]/wlumi_sum)*img->b[k*img->width+l];
-          ++subpid;//increment pixel id
-        }
-      }
-      sdlwa[0] += (stdev->rary->at(bid)/stdev->rsum)*lumi_r;
-      sdlwa[1] += (stdev->gary->at(bid)/stdev->gsum)*lumi_g;
-      sdlwa[2] += (stdev->bary->at(bid)/stdev->bsum)*lumi_b;
-      ++bid;//increment block id
+double* gains_from_statistics(const BlockStats& st) {
+  double* gains = new double[3]();
+  double sdwa[3] = {0, 0, 0};
+  const size_t nblocks = st.mean[0].size();
+  for (int c = 0; c < 3; ++c) {
+    if (st.std_sum[c] > 0.0) {
+      for (size_t i = 0; i < nblocks; ++i)
+        sdwa[c] += st.std[c][i] / st.std_sum[c] * st.mean[c][i];
+    } else {
+      // every block is flat: weights are undefined, use the plain average
+      for (size_t i = 0; i < nblocks; ++i) sdwa[c] += st.mean[c][i];
+      sdwa[c] /= double(nblocks);
     }
   }
-  return sdlwa;
+  const double avg = (sdwa[0] + sdwa[1] + sdwa[2]) / 3.0;
+  for (int c = 0; c < 3; ++c) gains[c] = sdwa[c] > 0.0 ? avg / sdwa[c] : 1.0;
+  return gains;
 }
 
-double calc_luminance(unsigned char r,unsigned char b, unsigned char g){
-  return (0.298912*r+0.586611*g+0.114478*b);
+}  // namespace
+
+double* calc_sdwgw(rgbimage_t* img, int subwidth, int subheight) {
+  return gains_from_statistics(block_statistics(img, subwidth, subheight, false, false));
 }
 
-double triangular_function(double luminance){
-  if(luminance<160){
-    return luminance*(1.0/160.0);
-  }else{
-    return 1.0-(luminance-160)*(1.0/160.0);
-  }
+double* calc_sdlwgw(rgbimage_t* img, int subwidth, int subheight) {
+  return gains_from_statistics(block_statistics(img, subwidth, subheight, true, false));
 }
 
-std_t* create_std(){
-  std_t* stdev = new std_t;
-  stdev->rary = new doubleary;
-  stdev->gary = new doubleary;
-  stdev->bary = new doubleary;
-  stdev->rsum = 0.0;
-  stdev->gsum = 0.0;
-  stdev->bsum = 0.0;
-  stdev->ravgary = new doubleary;
-  stdev->gavgary = new doubleary;
-  stdev->bavgary = new doubleary;
-  return stdev;
+double* calc_lwgw(rgbimage_t* img, int subwidth, int subheight) {
+  return gains_from_statistics(block_statistics(img, subwidth, subheight, true, true));
 }
 
-void delete_std(std_t* p){
-  delete p->rary;
-  delete p->gary;
-  delete p->bary;
-  delete p->ravgary;
-  delete p->gavgary;
-  delete p->bavgary;
-  delete p;
-}
-
-rscore_t* create_rscore(rgbimage_t* img){
-  rscore_t* rs = new rscore_t;
-  rs->rary = new_2d_mat(img);
-  rs->gary = new_2d_mat(img);
-  rs->bary = new_2d_mat(img);
-  rs->rmax = DBL_MIN;
-  rs->gmax = DBL_MIN;
-  rs->bmax = DBL_MIN;
-  rs->rmin = DBL_MAX;
-  rs->gmin = DBL_MAX;
-  rs->bmin = DBL_MAX;
-  return rs;
-}
-
-void delete_rsocre(rscore_t* rs,rgbimage_t* img){
-  delete_2d_mat(rs->rary,img);
-  delete_2d_mat(rs->gary,img);
-  delete_2d_mat(rs->bary,img);
-  delete rs;
-}
-
-void delete_doubleptr(double* p){
+void delete_doubleptr(double* p) {
   delete[] p;
 }
 
-double** new_2d_mat(rgbimage_t* img){
-  double** mat = new double*[img->width];
-  for(int i=0; i<img->width; ++i){
-    mat[i] = new double[img->height]();
-  }
-  return mat;
-}
+/*
+ * Automatic Color Equalization
+ *   A. Rizzi, C. Gatta, D. Marini, "A new algorithm for unsupervised global
+ *   and local color correction", Pattern Recognition Letters 24(11), 2003.
+ *
+ * Chromatic/spatial adjustment:
+ *   R_c(p) = sum_{j != p} r(I_c(p) - I_c(j)) / d(p, j)
+ * with the saturation function r(x) = clip(slope * x, -limit, limit) and the
+ * euclidean distance d.  Here the sum is normalised by sum_j limit / d(p, j)
+ * so that R_c(p) lies in [-1, 1] whatever the sample set is.
+ * The full sum is O(N^2); this implementation evaluates it on a random subset
+ * of `samples` pixels shared by every target pixel (one of the speed-ups
+ * suggested in the paper).  Dynamic tone reproduction scaling then stretches
+ * [min R_c, max R_c] linearly to [0, 255].
+ */
+void calc_ace(rgbimage_t* img, int samples, double slope, double limit,
+              unsigned int seed) {
+  const int W = img->width, H = img->height;
+  const size_t N = size_t(W) * size_t(H);
+  if (N == 0 || samples <= 0) return;
 
-void delete_2d_mat(double** mat,rgbimage_t* img){
-  for(int i = 0;i< img->width;++i){
-    delete[] mat[i];
-  }
-  delete[] mat;
-}
-
-double calc_euclidean(int ax, int ay, int bx, int by){
-  return sqrt(pow(ax-bx,2.0)+pow(ay-by,2.0));
-}
-
-double calc_inverse_exponential(int ax, int ay, int bx, int by,double alpha){
-  return 1.0/exp(calc_euclidean(ax,ay,bx,by)*-alpha);
-}
-
-
-double calc_manhattan(int ax, int ay, int bx, int by){
-  return (double)(abs(ax-bx)+abs(ay-by));
-}
-
-double calc_maximum(int ax, int ay, int bx, int by){
-  return ((abs(ax-bx)>abs(ay-by))? abs(ax-bx):abs(ay-by));
-}
-
-double calc_saturation(int diff,double slope,double limit){
-  double ret = diff*slope;
-  if(ret>limit){
-    return limit;
-  }else if(ret < (-limit)){
-    return  -limit;
-  }else{
-    return ret;
-  }
-}
-
-int get_pixel(unsigned char* ary,rgbimage_t* img, int x, int y){
-  return (int)ary[y*img->width+x];
-}
-
-void set_pixel(unsigned char* ary,rgbimage_t* img, int x, int y,unsigned char c){
-  ary[y*img->width+x]=c;
-}
-
-
-unsigned char linear_scaling(double r, double max, double min){
-  double slope = 255.0/(max - min);
-  return (unsigned char)((r-min)*slope);
-}
-
-unsigned char linear_scaling2(double r, double max, double min){
-  double slope = max/127.5;
-  return (unsigned char) (r*slope+127.5);
-}
-
-
-coordary create_random_pair(int size, int x,int y){
-  coordary ret;
-  for(int i=0;i<size;++i){
-    int ranx = rand()%x;
-    int rany = rand()%y;
-    ret.push_back(intpair(ranx,rany));
+  // random subset of pixel coordinates / values
+  std::mt19937 rng(seed);
+  std::vector<int> sx(samples), sy(samples);
+  std::vector<int> sv[3];
+  for (int c = 0; c < 3; ++c) sv[c].resize(samples);
+  unsigned char* ch[3] = {img->r, img->g, img->b};
+  for (int s = 0; s < samples; ++s) {
+    sx[s] = int(rng() % (unsigned int)W);
+    sy[s] = int(rng() % (unsigned int)H);
+    for (int c = 0; c < 3; ++c) sv[c][s] = ch[c][sy[s] * W + sx[s]];
   }
 
-  return ret;
+  // saturation function as a lookup table over the difference -255..255,
+  // already divided by `limit`
+  float sat[511];
+  for (int d = -255; d <= 255; ++d) {
+    double v = d * slope;
+    if (v > limit) v = limit;
+    if (v < -limit) v = -limit;
+    sat[d + 255] = float(v / limit);
+  }
+
+  std::vector<float> score[3];
+  for (int c = 0; c < 3; ++c) score[c].resize(N);
+  double rmax[3] = {-DBL_MAX, -DBL_MAX, -DBL_MAX};
+  double rmin[3] = {DBL_MAX, DBL_MAX, DBL_MAX};
+
+  std::vector<float> invd(samples);
+  for (int y = 0; y < H; ++y) {
+    for (int x = 0; x < W; ++x) {
+      const size_t p = size_t(y) * W + x;
+      // 1/d(p, j) for every sample; the pixel itself (d = 0) is excluded
+      double denom = 0.0;
+      for (int s = 0; s < samples; ++s) {
+        const int dx = x - sx[s], dy = y - sy[s];
+        const int d2 = dx * dx + dy * dy;
+        const float w = d2 > 0 ? 1.0f / sqrtf(float(d2)) : 0.0f;
+        invd[s] = w;
+        denom += w;
+      }
+      if (denom <= 0.0) {  // every sample is this very pixel
+        for (int c = 0; c < 3; ++c) score[c][p] = 0.0f;
+        continue;
+      }
+      for (int c = 0; c < 3; ++c) {
+        const int v = ch[c][p];
+        const int* vals = &sv[c][0];
+        double acc = 0.0;
+        for (int s = 0; s < samples; ++s) acc += sat[v - vals[s] + 255] * invd[s];
+        const double r = acc / denom;
+        score[c][p] = float(r);
+        if (r > rmax[c]) rmax[c] = r;
+        if (r < rmin[c]) rmin[c] = r;
+      }
+    }
+  }
+
+  // dynamic tone reproduction scaling: [min, max] -> [0, 255]
+  for (int c = 0; c < 3; ++c) {
+    const double range = rmax[c] - rmin[c];
+    if (range <= 0.0) {
+      // flat channel: no contrast to stretch, map to middle grey
+      for (size_t p = 0; p < N; ++p) ch[c][p] = 128;
+      continue;
+    }
+    const double scale = 255.0 / range;
+    for (size_t p = 0; p < N; ++p) {
+      double v = (score[c][p] - rmin[c]) * scale + 0.5;
+      if (v < 0.0) v = 0.0;
+      if (v > 255.0) v = 255.0;
+      ch[c][p] = (unsigned char)v;
+    }
+  }
 }

@@ -11,14 +11,21 @@ description::
 
 require::
 
-    python2.6 or later
-    numpy
-    Pillow
+    python3.10 or later
+    numpy>=2.0
+    Pillow>=10.0
+    a C++ compiler (the block based algorithms and the sampled ACE are in C++)
 
 install::
 
-    % python setup.py build
-    % python setup.py install
+    % pip install .
+
+    (a C++ compiler is needed; "python -m build" creates sdist and wheel)
+
+test::
+
+    % pip install -e .
+    % python -m unittest discover -s test -p "*_test.py"
 
 impement algorithms::
 
@@ -34,7 +41,7 @@ impement algorithms::
     retinex
         colorcorrect.algorithm.retinex
         usage: image
-    retinex with adjust
+    retinex with adjust (gray world + retinex quadratic mapping)
             colorcorrect.algorithm.retinex_with_adjust
             usage: image
     standard deviation weighted grey world
@@ -46,13 +53,25 @@ impement algorithms::
     luminance weighted gray world
               colorcorrect.algorithm.luminance_weighted_gray_world
              usage: image,subblock width(default:20), subblock height(default:20)
+    (each block based algorithm also has a pure numpy twin with a _python suffix)
     automatic color equalization
               colorcorrect.algorithm.automatic_color_equalization
-              usage: image,slope(default:10),limit(default:1000)
+              usage: image,slope(default:10),limit(default:1000),samples(default:500),
+                     method(default:"fft"),levels(default:16),seed(default:None),workers(default:None)
+              method="fft" evaluates the full image sum of the paper with FFT
+              convolutions (exact up to the interpolation over `levels` grey
+              levels, deterministic, multi-threaded).  method="sampling" is the
+              Monte-Carlo C++ implementation comparing every pixel with
+              `samples` random pixels; pass `seed` for reproducible output.
+              The saturation function is r(x) = clip(slope*x, -limit, limit) on
+              pixel differences in [-255, 255].
+
+All functions take and return (height, width, 3) uint8 numpy arrays and never
+modify their input.
 
 sample usage::
 
-    >>> import Image
+    >>> from PIL import Image
     >>> import colorcorrect.algorithm as cca
     >>> from colorcorrect.util import from_pil, to_pil
     >>> img = Image.open('/path/to/image')
@@ -62,4 +81,6 @@ References::
 
     Denis. Nikitenko, M. Wirth and K. Trudel, "Applicability Of White-Balancing Algorithms to Restoring Faded Colour Slides: An Empirical Evaluation.", Journal of Multimedia, vol. 3, no. 5, 2008.
     HK. Lam, OC. Au and CW. Wong, "Automatic white balancing using luminance component and standard deviation of RGB components", in Proc. ICASSP, 2004.
+    E. Lam, "Combining gray world and retinex theory for automatic white balance in digital photography", in Proc. ISCE, 2005.
     A. Rizzi, C. Gatta and D. Marini, "A new algorithm for unsupervised global and local color correction.", Pattern Recognition Letters, vol. 24, no. 11, 2003.
+    P. Getreuer, "Automatic Color Enhancement (ACE) and its Fast Implementation", Image Processing On Line, 2012. (FFT evaluation of ACE)

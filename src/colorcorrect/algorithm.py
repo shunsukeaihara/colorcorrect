@@ -1,17 +1,24 @@
 # -*- coding: utf-8 -*-
-from __future__ import division
-import numpy as np
+"""
+Colour correction / automatic white balance algorithms.
+
+Every function takes an ``(height, width, 3)`` RGB ``numpy.uint8`` array (see
+``colorcorrect.util.from_pil``) and returns a new array of the same shape and
+dtype.  The input array is never modified.
+"""
+import os
+from concurrent.futures import ThreadPoolExecutor
 from ctypes import POINTER
 from ctypes import pointer
 from ctypes import Structure
 from ctypes import c_ubyte
 from ctypes import c_int
+from ctypes import c_uint
 from ctypes import c_double
 from ctypes import c_void_p
-from six.moves import range
-from six.moves import xrange
 
-import os
+import numpy as np
+
 cutilfolder = os.path.abspath(__file__).rsplit(os.path.sep, 1)[0]
 cutilname = "_cutil"
 libcutil = np.ctypeslib.load_library(cutilname, cutilfolder)
@@ -34,43 +41,85 @@ libcutil.calc_sdlwgw.restype = c_void_p
 libcutil.calc_lwgw.argtypes = [POINTER(RGBImage), c_int, c_int]
 libcutil.calc_lwgw.restype = c_void_p
 libcutil.delete_doubleptr.argtypes = [c_void_p]
-libcutil.calc_ace.argtypes = [POINTER(RGBImage), c_int, c_double, c_double]
+libcutil.calc_ace.argtypes = [POINTER(RGBImage), c_int, c_double, c_double, c_uint]
 
 
+# ---------------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------------
+def _planes(nimg):
+    """(H, W, 3) uint8 -> contiguous (3, H, W) uint8 copy."""
+    nimg = np.asarray(nimg)
+    if nimg.ndim != 3 or nimg.shape[2] != 3:
+        raise ValueError("expected an (height, width, 3) RGB array, got shape %r" % (nimg.shape,))
+    return np.ascontiguousarray(nimg.transpose(2, 0, 1), dtype=np.uint8)
+
+
+def _to_image(planes):
+    return np.ascontiguousarray(planes.transpose(1, 2, 0))
+
+
+def _apply_gains(nimg, gains, maxval=255):
+    """Multiply every channel by its gain and clip to [0, maxval]."""
+    out = nimg.astype(np.float64) * np.asarray(gains, dtype=np.float64)
+    return np.clip(np.rint(out), 0, maxval).astype(nimg.dtype)
+
+
+def _safe_ratio(numerator, denominator):
+    """numerator / denominator, or 1.0 when the denominator is zero."""
+    return numerator / denominator if denominator > 0 else 1.0
+
+
+def _rgbimage(planes):
+    return RGBImage(planes.shape[2],
+                    planes.shape[1],
+                    planes[0].ctypes.data_as(POINTER(c_ubyte)),
+                    planes[1].ctypes.data_as(POINTER(c_ubyte)),
+                    planes[2].ctypes.data_as(POINTER(c_ubyte)))
+
+
+def _c_gains(func, nimg, subwidth, subheight):
+    if subwidth <= 0 or subheight <= 0:
+        raise ValueError("sub-block size must be positive")
+    planes = _planes(nimg)
+    ret = func(pointer(_rgbimage(planes)), int(subwidth), int(subheight))
+    gains = np.ctypeslib.as_array((c_double * 3).from_address(ret)).copy()
+    libcutil.delete_doubleptr(ret)
+    return gains
+
+
+# ---------------------------------------------------------------------------
+# global algorithms
+# ---------------------------------------------------------------------------
 def stretch_pre(nimg):
     """
-    from 'Applicability Of White-Balancing Algorithms to Restoring Faded Colour Slides: An Empirical Evaluation'
+    Subtract the per channel minimum (first half of "stretch").
+
+    from 'Applicability Of White-Balancing Algorithms to Restoring Faded Colour
+    Slides: An Empirical Evaluation'
     """
-    nimg = nimg.transpose(2, 0, 1)
-    nimg[0] = np.maximum(nimg[0] - nimg[0].min(), 0)
-    nimg[1] = np.maximum(nimg[1] - nimg[1].min(), 0)
-    nimg[2] = np.maximum(nimg[2] - nimg[2].min(), 0)
-    return nimg.transpose(1, 2, 0)
+    nimg = np.asarray(nimg)
+    return (nimg - nimg.min(axis=(0, 1), keepdims=True)).astype(nimg.dtype)
 
 
 def grey_world(nimg):
-    nimg = nimg.transpose(2, 0, 1).astype(np.uint32)
-    mu_g = np.average(nimg[1])
-    nimg[0] = np.minimum(nimg[0] * (mu_g / np.average(nimg[0])), 255)
-    nimg[2] = np.minimum(nimg[2] * (mu_g / np.average(nimg[2])), 255)
-    return nimg.transpose(1, 2, 0).astype(np.uint8)
+    """Grey world: scale R and B so that their means equal the mean of G."""
+    nimg = np.asarray(nimg)
+    mu = nimg.reshape(-1, 3).mean(axis=0)
+    gains = [_safe_ratio(mu[1], mu[0]), 1.0, _safe_ratio(mu[1], mu[2])]
+    return _apply_gains(nimg, gains)
 
 
 def max_white(nimg):
-    if nimg.dtype == np.uint8:
-        brightest = float(2 ** 8)
-    elif nimg.dtype == np.uint16:
-        brightest = float(2 ** 16)
-    elif nimg.dtype == np.uint32:
-        brightest = float(2 ** 32)
+    """Max white: scale every channel so that its maximum becomes the brightest value."""
+    nimg = np.asarray(nimg)
+    if np.issubdtype(nimg.dtype, np.integer):
+        brightest = np.iinfo(nimg.dtype).max
     else:
-        brightest = float(2 ** 8)
-    nimg = nimg.transpose(2, 0, 1)
-    nimg = nimg.astype(np.int32)
-    nimg[0] = np.minimum(nimg[0] * (brightest / float(nimg[0].max())), 255)
-    nimg[1] = np.minimum(nimg[1] * (brightest / float(nimg[1].max())), 255)
-    nimg[2] = np.minimum(nimg[2] * (brightest / float(nimg[2].max())), 255)
-    return nimg.transpose(1, 2, 0).astype(np.uint8)
+        brightest = 1.0
+    mx = nimg.reshape(-1, 3).max(axis=0)
+    gains = [_safe_ratio(brightest, float(m)) for m in mx]
+    return _apply_gains(nimg, gains, maxval=brightest)
 
 
 def stretch(nimg):
@@ -78,106 +127,143 @@ def stretch(nimg):
 
 
 def retinex(nimg):
-    nimg = nimg.transpose(2, 0, 1).astype(np.uint32)
-    mu_g = nimg[1].max()
-    nimg[0] = np.minimum(nimg[0] * (mu_g / float(nimg[0].max())), 255)
-    nimg[2] = np.minimum(nimg[2] * (mu_g / float(nimg[2].max())), 255)
-    return nimg.transpose(1, 2, 0).astype(np.uint8)
+    """Retinex / white patch: scale R and B so that their maxima equal the maximum of G."""
+    nimg = np.asarray(nimg)
+    mx = nimg.reshape(-1, 3).max(axis=0).astype(np.float64)
+    gains = [_safe_ratio(mx[1], mx[0]), 1.0, _safe_ratio(mx[1], mx[2])]
+    return _apply_gains(nimg, gains)
 
 
-def retinex_adjust(nimg):
+def _quadratic_fit(channel, ref_sum, ref_max):
     """
-    from 'Combining Gray World and Retinex Theory for Automatic White Balance in Digital Photography'
+    Solve for (mu, nu) so that mu*x^2 + nu*x satisfies both the grey world and
+    the retinex constraint against the reference channel:
+
+        [sum x^2, sum x] [mu]   [sum ref]
+        [max x^2, max x] [nu] = [max ref]
     """
-    nimg = nimg.transpose(2, 0, 1).astype(np.uint32)
-    sum_r = np.sum(nimg[0])
-    sum_r2 = np.sum(nimg[0] ** 2)
-    max_r = nimg[0].max()
-    max_r2 = max_r ** 2
-    sum_g = np.sum(nimg[1])
-    max_g = nimg[1].max()
-    coefficient = np.linalg.solve(np.array([[sum_r2, sum_r], [max_r2, max_r]]),
-                                  np.array([sum_g, max_g]))
-    nimg[0] = np.minimum((nimg[0] ** 2) * coefficient[0] + nimg[0] * coefficient[1], 255)
-    sum_b = np.sum(nimg[2])
-    sum_b2 = np.sum(nimg[2] ** 2)
-    max_b = nimg[2].max()
-    max_b2 = max_b ** 2
-    coefficient = np.minimum(np.linalg.solve(np.array([[sum_b2, sum_b], [max_b2, max_b]]),
-                                             np.array([sum_g, max_g])), 255)
-    nimg[2] = (nimg[2] ** 2) * coefficient[0] + nimg[2] * coefficient[1]
-    return nimg.transpose(1, 2, 0).astype(np.uint8)
+    x = channel.astype(np.float64)
+    s1, s2 = x.sum(), np.square(x).sum()
+    m1 = x.max()
+    a = np.array([[s2, s1], [m1 * m1, m1]])
+    # a flat (or black) channel makes the rows collinear; test the determinant
+    # relative to the row norms so the check does not depend on image size
+    scale = np.linalg.norm(a[0]) * np.linalg.norm(a[1])
+    if m1 <= 0 or scale <= 0 or abs(np.linalg.det(a)) <= 1e-9 * scale:
+        return 0.0, _safe_ratio(ref_max, m1)
+    try:
+        mu, nu = np.linalg.solve(a, np.array([ref_sum, ref_max]))
+    except np.linalg.LinAlgError:
+        return 0.0, _safe_ratio(ref_max, m1)
+    return mu, nu
 
 
 def retinex_with_adjust(nimg):
-    return retinex_adjust(retinex(nimg))
+    """
+    from 'Combining Gray World and Retinex Theory for Automatic White Balance
+    in Digital Photography' (E. Lam, 2005)
+
+    R and B are mapped through a quadratic x -> mu*x^2 + nu*x whose
+    coefficients make them satisfy both the grey world (mean) and the retinex
+    (max) assumption with respect to G.  The mapping already enforces the
+    retinex constraint, so no separate retinex pass is run first.
+    """
+    nimg = np.asarray(nimg)
+    out = nimg.astype(np.float64)
+    g = out[..., 1]
+    ref_sum, ref_max = g.sum(), g.max()
+    for c in (0, 2):
+        mu, nu = _quadratic_fit(out[..., c], ref_sum, ref_max)
+        x = out[..., c]
+        out[..., c] = mu * x * x + nu * x
+    return np.clip(np.rint(out), 0, 255).astype(np.uint8)
+
+
+# ---------------------------------------------------------------------------
+# block based grey world variants (Lam, Au, Wong, ICASSP 2004)
+# ---------------------------------------------------------------------------
+LUMINANCE_PEAK = 160.0
+
+
+def _luminance(rgb):
+    return 0.298912 * rgb[..., 0] + 0.586611 * rgb[..., 1] + 0.114478 * rgb[..., 2]
+
+
+def _triangular_weight(y):
+    """Triangular luminance weight: 0 at Y=0, 1 at Y=160, 0 at Y=255."""
+    y = np.asarray(y, dtype=np.float64)
+    rising = y / LUMINANCE_PEAK
+    falling = (255.0 - y) / (255.0 - LUMINANCE_PEAK)
+    return np.clip(np.where(y < LUMINANCE_PEAK, rising, falling), 0.0, None)
+
+
+def _block_reduce(values, subwidth, subheight):
+    """Sum ``values`` (H, W[, C]) over sub-blocks; border blocks may be smaller."""
+    h, w = values.shape[:2]
+    rows = np.add.reduceat(values, np.arange(0, h, subheight), axis=0)
+    return np.add.reduceat(rows, np.arange(0, w, subwidth), axis=1)
+
+
+def _block_gains(nimg, subwidth, subheight, luminance_weighted, std_weighted):
+    """
+    Numpy implementation of the SDWGW / SDLWGW / LWGW gains:
+
+        SDWA_c = sum_i sigma_c(i) / sum_j sigma_c(j) * mu_c(i)
+        gain_c = mean(SDWA) / SDWA_c
+    """
+    if subwidth <= 0 or subheight <= 0:
+        raise ValueError("sub-block size must be positive")
+    f = np.asarray(nimg).astype(np.float64)
+    h, w, _ = f.shape
+    counts = _block_reduce(np.ones((h, w)), subwidth, subheight)[..., None]
+    sums = _block_reduce(f, subwidth, subheight)
+    means = sums / counts
+    if luminance_weighted:
+        wgt = _triangular_weight(_luminance(f))
+        wsum = _block_reduce(wgt, subwidth, subheight)[..., None]
+        wmeans = _block_reduce(f * wgt[..., None], subwidth, subheight)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            wmeans = wmeans / wsum
+        means = np.where(wsum > 0, wmeans, means)
+    if std_weighted:
+        sq = _block_reduce(np.square(f), subwidth, subheight)
+        var = (sq - sums * sums / counts) / np.maximum(counts - 1, 1)
+        std = np.sqrt(np.maximum(var, 0.0)).reshape(-1, 3)
+    else:
+        std = np.ones((means.shape[0] * means.shape[1], 3))
+    means = means.reshape(-1, 3)
+    std_sum = std.sum(axis=0)
+    weights = np.where(std_sum > 0, std / np.where(std_sum > 0, std_sum, 1.0),
+                       1.0 / means.shape[0])
+    sdwa = (weights * means).sum(axis=0)
+    return np.array([_safe_ratio(sdwa.mean(), v) for v in sdwa])
 
 
 def standard_deviation_weighted_grey_world_python(nimg, subwidth=20, subheight=20):
-    nimg = nimg.astype(np.uint32)
-    height, width, ch = nimg.shape
-    strides = nimg.itemsize * np.array([width * subheight, subwidth, width, 3, 1])
-    shape = (height // subheight, width // subwidth, subheight, subwidth, 3)
-    blocks = np.lib.stride_tricks.as_strided(nimg, shape=shape, strides=strides)
-    y, x = blocks.shape[:2]
-    std_r = np.zeros([y, x], dtype=np.float16)
-    std_g = np.zeros([y, x], dtype=np.float16)
-    std_b = np.zeros([y, x], dtype=np.float16)
-    std_r_sum = 0.0
-    std_g_sum = 0.0
-    std_b_sum = 0.0
-    for i in range(y):
-        for j in range(x):
-            subblock = blocks[i, j]
-            subb = subblock.transpose(2, 0, 1)
-            std_r[i, j] = np.std(subb[0])
-            std_g[i, j] = np.std(subb[1])
-            std_b[i, j] = np.std(subb[2])
-            std_r_sum += std_r[i, j]
-            std_g_sum += std_g[i, j]
-            std_b_sum += std_b[i, j]
-    sdwa_r = 0.0
-    sdwa_g = 0.0
-    sdwa_b = 0.0
-    for i in xrange(y):
-        for j in xrange(x):
-            subblock = blocks[i, j]
-            subb = subblock.transpose(2, 0, 1)
-            mean_r = np.mean(subb[0])
-            mean_g = np.mean(subb[1])
-            mean_b = np.mean(subb[2])
-            sdwa_r += (std_r[i, j] / std_r_sum) * mean_r
-            sdwa_g += (std_g[i, j] / std_g_sum) * mean_g
-            sdwa_b += (std_b[i, j] / std_b_sum) * mean_b
-    sdwa_avg = (sdwa_r + sdwa_g + sdwa_b) / 3.0
-    gain_r = sdwa_avg / sdwa_r
-    gain_g = sdwa_avg / sdwa_g
-    gain_b = sdwa_avg / sdwa_b
-    nimg = nimg.transpose(2, 0, 1)
-    nimg[0] = np.minimum(nimg[0] * gain_r, 255)
-    nimg[1] = np.minimum(nimg[1] * gain_g, 255)
-    nimg[2] = np.minimum(nimg[2] * gain_b, 255)
-    return nimg.transpose(1, 2, 0).astype(np.uint8)
+    """Pure numpy version of :func:`standard_deviation_weighted_grey_world`."""
+    gains = _block_gains(nimg, subwidth, subheight, luminance_weighted=False, std_weighted=True)
+    return _apply_gains(nimg, gains)
+
+
+def standard_deviation_and_luminance_weighted_gray_world_python(nimg, subwidth=20, subheight=20):
+    """Pure numpy version of :func:`standard_deviation_and_luminance_weighted_gray_world`."""
+    gains = _block_gains(nimg, subwidth, subheight, luminance_weighted=True, std_weighted=True)
+    return _apply_gains(nimg, gains)
+
+
+def luminance_weighted_gray_world_python(nimg, subwidth=20, subheight=20):
+    """Pure numpy version of :func:`luminance_weighted_gray_world`."""
+    gains = _block_gains(nimg, subwidth, subheight, luminance_weighted=True, std_weighted=False)
+    return _apply_gains(nimg, gains)
 
 
 def standard_deviation_weighted_grey_world(nimg, subwidth=20, subheight=20):
-    nimg = nimg.transpose(2, 0, 1)
-    nimg = np.ascontiguousarray(nimg, dtype=np.uint8)
-    img = RGBImage(nimg.shape[2],
-                   nimg.shape[1],
-                   nimg[0].ctypes.data_as(POINTER(c_ubyte)),
-                   nimg[1].ctypes.data_as(POINTER(c_ubyte)),
-                   nimg[2].ctypes.data_as(POINTER(c_ubyte)))
-    gains = c_double * 3
-    ret = libcutil.calc_sdwgw(pointer(img), subwidth, subheight)
-    gains = np.ctypeslib.as_array(gains.from_address(ret))
-    gains = gains.copy()
-    libcutil.delete_doubleptr(ret)
-    nimg = nimg.astype(np.uint32)
-    nimg[0] = np.minimum(nimg[0] * gains[0], 255)
-    nimg[1] = np.minimum(nimg[1] * gains[1], 255)
-    nimg[2] = np.minimum(nimg[2] * gains[2], 255)
-    return nimg.transpose(1, 2, 0).astype(np.uint8)
+    """
+    AUTOMATIC WHITE BALANCING USING LUMINANCE COMPONENT AND STANDARD DEVIATION OF RGB COMPONENTS
+    http://www.ece.umassd.edu/faculty/acosta/icassp/icassp_2004/pdfs/0300493.pdf
+    """
+    gains = _c_gains(libcutil.calc_sdwgw, nimg, subwidth, subheight)
+    return _apply_gains(nimg, gains)
 
 
 def standard_deviation_and_luminance_weighted_gray_world(nimg, subwidth=20, subheight=20):
@@ -185,23 +271,8 @@ def standard_deviation_and_luminance_weighted_gray_world(nimg, subwidth=20, subh
     AUTOMATIC WHITE BALANCING USING LUMINANCE COMPONENT AND STANDARD DEVIATION OF RGB COMPONENTS
     http://www.ece.umassd.edu/faculty/acosta/icassp/icassp_2004/pdfs/0300493.pdf
     """
-    nimg = nimg.transpose(2, 0, 1)
-    nimg = np.ascontiguousarray(nimg, dtype=np.uint8)
-    img = RGBImage(nimg.shape[2],
-                   nimg.shape[1],
-                   nimg[0].ctypes.data_as(POINTER(c_ubyte)),
-                   nimg[1].ctypes.data_as(POINTER(c_ubyte)),
-                   nimg[2].ctypes.data_as(POINTER(c_ubyte)))
-    gains = c_double * 3
-    ret = libcutil.calc_sdlwgw(pointer(img), subwidth, subheight)
-    gains = np.ctypeslib.as_array(gains.from_address(ret))
-    gains = gains.copy()
-    libcutil.delete_doubleptr(ret)
-    nimg = nimg.astype(np.uint32)
-    nimg[0] = np.minimum(nimg[0] * gains[0], 255)
-    nimg[1] = np.minimum(nimg[1] * gains[1], 255)
-    nimg[2] = np.minimum(nimg[2] * gains[2], 255)
-    return nimg.transpose(1, 2, 0).astype(np.uint8)
+    gains = _c_gains(libcutil.calc_sdlwgw, nimg, subwidth, subheight)
+    return _apply_gains(nimg, gains)
 
 
 def luminance_weighted_gray_world(nimg, subwidth=20, subheight=20):
@@ -209,36 +280,142 @@ def luminance_weighted_gray_world(nimg, subwidth=20, subheight=20):
     AUTOMATIC WHITE BALANCING USING LUMINANCE COMPONENT AND STANDARD DEVIATION OF RGB COMPONENTS
     http://www.ece.umassd.edu/faculty/acosta/icassp/icassp_2004/pdfs/0300493.pdf
     """
-    nimg = nimg.transpose(2, 0, 1)
-    nimg = np.ascontiguousarray(nimg, dtype=np.uint8)
-    img = RGBImage(nimg.shape[2],
-                   nimg.shape[1],
-                   nimg[0].ctypes.data_as(POINTER(c_ubyte)),
-                   nimg[1].ctypes.data_as(POINTER(c_ubyte)),
-                   nimg[2].ctypes.data_as(POINTER(c_ubyte)))
-    gains = c_double * 3
-    ret = libcutil.calc_lwgw(pointer(img), subwidth, subheight)
-    gains = np.ctypeslib.as_array(gains.from_address(ret))
-    gains = gains.copy()
-    libcutil.delete_doubleptr(ret)
-    nimg = nimg.astype(np.uint32)
-    nimg[0] = np.minimum(nimg[0] * gains[0], 255)
-    nimg[1] = np.minimum(nimg[1] * gains[1], 255)
-    nimg[2] = np.minimum(nimg[2] * gains[2], 255)
-    return nimg.transpose(1, 2, 0).astype(np.uint8)
+    gains = _c_gains(libcutil.calc_lwgw, nimg, subwidth, subheight)
+    return _apply_gains(nimg, gains)
 
 
-def automatic_color_equalization(nimg, slope=10, limit=1000, samples=500):
+# ---------------------------------------------------------------------------
+# automatic color equalization (Rizzi, Gatta, Marini, 2003)
+# ---------------------------------------------------------------------------
+def _fast_len(n):
+    """Smallest 2/3/5-smooth integer >= n (fast FFT size)."""
+    while True:
+        m = n
+        for p in (2, 3, 5):
+            while m % p == 0:
+                m //= p
+        if m == 1:
+            return n
+        n += 1
+
+
+def _ace_fft(planes, slope, limit, levels, workers=None):
     """
-    A. Rizzi, C. Gatta and D. Marini, "A new algorithm for unsupervised global and local color correction.",
-    Pattern Recognition Letters, vol. 24, no. 11, 2003.
+    Exact (whole image) ACE chromatic/spatial adjustment via FFT convolution.
+
+    R_c(p) = sum_{j != p} r(I_c(p) - I_c(j)) / d(p, j)  /  sum_{j != p} 1 / d(p, j)
+
+    For a fixed grey level v the map p -> sum_j r(v - I_c(j)) / d(p, j) is a
+    convolution of r(v - I_c) with the 1/d kernel.  It is evaluated for
+    ``levels`` equally spaced values of v and linearly interpolated at the
+    pixel's own value, in the spirit of Getreuer's fast ACE (IPOL 2012).
+    numpy's FFT releases the GIL, so the convolutions run in a thread pool.
     """
-    nimg = nimg.transpose(2, 0, 1)
-    nimg = np.ascontiguousarray(nimg, dtype=np.uint8)
-    img = RGBImage(nimg.shape[2],
-                   nimg.shape[1],
-                   nimg[0].ctypes.data_as(POINTER(c_ubyte)),
-                   nimg[1].ctypes.data_as(POINTER(c_ubyte)),
-                   nimg[2].ctypes.data_as(POINTER(c_ubyte)))
-    libcutil.calc_ace(pointer(img), samples, slope, limit)
-    return nimg.transpose(1, 2, 0)
+    _, h, w = planes.shape
+    ph, pw = _fast_len(2 * h - 1), _fast_len(2 * w - 1)
+    # circular 1/d kernel; the padding guarantees a linear convolution
+    dy = np.arange(ph)
+    dy = np.where(dy > ph // 2, dy - ph, dy).astype(np.float64)
+    dx = np.arange(pw)
+    dx = np.where(dx > pw // 2, dx - pw, dx).astype(np.float64)
+    dist = np.sqrt(dy[:, None] ** 2 + dx[None, :] ** 2)
+    with np.errstate(divide="ignore"):
+        kernel = np.where(dist > 0, 1.0 / dist, 0.0)
+    # single precision halves the memory of the padded transforms and is
+    # accurate to ~1e-6 relative, far below one grey level
+    kernel_f = np.fft.rfft2(kernel.astype(np.float32))
+
+    def convolve(f):
+        spectrum = np.fft.rfft2(f.astype(np.float32), s=(ph, pw)) * kernel_f
+        return np.fft.irfft2(spectrum, s=(ph, pw))[:h, :w].astype(np.float64)
+
+    denom = convolve(np.ones((h, w)))
+    denom = np.where(denom > 0, denom, 1.0)
+
+    # saturation function of the (integer) pixel difference, in units of `limit`
+    sat_lut = np.clip(np.arange(-255, 256, dtype=np.float64) * slope / limit, -1.0, 1.0)
+    level_values = np.linspace(0.0, 255.0, levels)
+    scale = (levels - 1) / 255.0
+
+    def level_term(args):
+        img, k, _ = args
+        # weight of level k in the linear interpolation at every pixel
+        wk = np.clip(1.0 - np.abs(img * scale - k), 0.0, None)
+        if not wk.any():
+            return None
+        v = level_values[k]
+        if float(v).is_integer():
+            sat = sat_lut[int(v) - img + 255]
+        else:
+            sat = np.clip((v - img) * slope / limit, -1.0, 1.0)
+        return wk * convolve(sat)
+
+    if workers is None:
+        workers = min(8, os.cpu_count() or 1)
+    channels = [planes[c].astype(np.int64) for c in range(3)]
+    jobs = [(channels[c], k, c) for c in range(3) for k in range(levels)]
+    scores = np.zeros((3, h, w))
+    if workers > 1:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            terms = pool.map(level_term, jobs)
+            for (_, _, c), term in zip(jobs, terms):
+                if term is not None:
+                    scores[c] += term
+    else:
+        for job in jobs:
+            c = job[2]
+            term = level_term(job)
+            if term is not None:
+                scores[c] += term
+    scores /= denom
+    return scores
+
+
+def _ace_scale(scores):
+    """Dynamic tone reproduction scaling: [min, max] -> [0, 255] per channel."""
+    out = np.empty(scores.shape, dtype=np.uint8)
+    for c in range(scores.shape[0]):
+        lo, hi = scores[c].min(), scores[c].max()
+        if hi - lo <= 0:
+            out[c] = 128
+        else:
+            out[c] = np.clip(np.rint((scores[c] - lo) * (255.0 / (hi - lo))), 0, 255)
+    return out
+
+
+def automatic_color_equalization(nimg, slope=10, limit=1000, samples=500,
+                                 method="fft", levels=16, seed=None, workers=None):
+    """
+    A. Rizzi, C. Gatta and D. Marini, "A new algorithm for unsupervised global
+    and local color correction.", Pattern Recognition Letters, vol. 24, no. 11, 2003.
+
+    slope, limit: saturation function r(x) = clip(slope * x, -limit, limit)
+        applied to pixel differences in [-255, 255]; the default saturates
+        for differences larger than 100 levels.
+    method: "fft" (default) evaluates the full image sum exactly (up to the
+        interpolation over ``levels`` grey levels) with FFT convolutions and
+        is deterministic.  "sampling" is the Monte-Carlo C implementation that
+        compares every pixel with ``samples`` random pixels; ``seed`` picks
+        the random subset (None: a fresh random subset every call).
+    levels: number of grey levels at which the "fft" method evaluates the
+        convolution (16 keeps the result within one grey level of the exact
+        sum on test images; 256 is exact).
+    workers: threads used by the "fft" method (None: up to 8 CPU cores).
+    """
+    if slope <= 0 or limit <= 0:
+        raise ValueError("slope and limit must be positive")
+    planes = _planes(nimg)
+    if method == "fft":
+        if levels < 2:
+            raise ValueError("levels must be at least 2")
+        scores = _ace_fft(planes, float(slope), float(limit), int(levels), workers)
+        return _to_image(_ace_scale(scores))
+    elif method == "sampling":
+        if samples <= 0:
+            raise ValueError("samples must be positive")
+        if seed is None:
+            seed = int(np.random.randint(0, 2 ** 32, dtype=np.uint64))
+        libcutil.calc_ace(pointer(_rgbimage(planes)), int(samples), float(slope),
+                          float(limit), c_uint(int(seed) & 0xFFFFFFFF))
+        return _to_image(planes)
+    raise ValueError("unknown method %r (expected 'fft' or 'sampling')" % (method,))
