@@ -8,7 +8,7 @@ import os
 from setuptools import setup, Extension
 from setuptools.command.build_ext import build_ext
 
-EXPORTED = ["calc_sdwgw", "calc_sdlwgw", "calc_lwgw", "calc_ace", "calc_rsr", "delete_doubleptr"]
+EXPORTED = ["calc_sdwgw", "calc_sdlwgw", "calc_lwgw", "calc_ace", "calc_rsr", "calc_race", "delete_doubleptr"]
 
 import sys
 

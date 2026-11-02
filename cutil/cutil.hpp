@@ -30,6 +30,16 @@ extern "C"{
      the hardware concurrency. */
   void calc_rsr(const rgbimage_t* in, rgbimage_t* out, int sprays, int points,
                 double radius, unsigned int seed, int threads);
+  /* RACE (Provenzi, Gatta, Fierro, Rizzi 2008): per spray the average of the
+     RSR ratio I(i)/max and the spray ACE term mean s~_alpha(I(i) - I(j)).
+     regularize != 0 applies the sigma-RACE contrast driven regulariser:
+     each spray contribution is mixed with the original value using
+     (2 sigma_k(i))^(sigma_min/sigma_max), sigma_k being the standard deviation
+     of the spray and sigma_min/max the smallest/largest global channel
+     standard deviation (intensities in [0, 1]). */
+  void calc_race(const rgbimage_t* in, rgbimage_t* out, int sprays, int points,
+                 double radius, double alpha, int regularize, unsigned int seed,
+                 int threads);
 }
 
 #endif

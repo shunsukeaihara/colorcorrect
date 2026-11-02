@@ -43,6 +43,8 @@ libcutil.calc_lwgw.restype = c_void_p
 libcutil.delete_doubleptr.argtypes = [c_void_p]
 libcutil.calc_ace.argtypes = [POINTER(RGBImage), c_int, c_double, c_double, c_uint, c_double]
 libcutil.calc_rsr.argtypes = [POINTER(RGBImage), POINTER(RGBImage), c_int, c_int, c_double, c_uint, c_int]
+libcutil.calc_race.argtypes = [POINTER(RGBImage), POINTER(RGBImage), c_int, c_int, c_double, c_double,
+                               c_int, c_uint, c_int]
 
 
 # ---------------------------------------------------------------------------
@@ -739,3 +741,214 @@ def random_spray_retinex(nimg, sprays=10, points=250, radius=None, seed=None, wo
                       float(radius) if radius else 0.0, c_uint(int(seed) & 0xFFFFFFFF),
                       int(workers) if workers else 0)
     return _to_image(out)
+
+
+def race(nimg, sprays=10, points=250, alpha=20.0, regularize=True, radius=None,
+         seed=None, workers=None):
+    """
+    E. Provenzi, C. Gatta, M. Fierro and A. Rizzi, "A Spatially Variant
+    White-Patch and Gray-World Method for Color Image Enhancement Driven by
+    Local Contrast", IEEE Trans. PAMI 30(10), 2008.
+
+    RACE fuses the local white patch of Random Spray Retinex with a spray
+    version of ACE's local grey world: for every spray the lightness is
+    1/2 * (I(i)/max(spray) + mean_j s~_alpha(I(i) - I(j))) with the slope
+    function s~_alpha of eq. (10) (alpha=20 is the paper's stable choice),
+    averaged over ``sprays`` sprays of ``points`` pixels (radial density 1/r,
+    radius ``radius``, None: image diagonal).
+
+    regularize=True gives sigma-RACE (eq. 23): every spray term is mixed
+    with the original value through (2 sigma_k)^(sigma_min/sigma_max), where
+    sigma_k is the standard deviation inside the spray and sigma_min/max the
+    smallest/largest global channel standard deviation, so uniform areas keep
+    their value instead of turning into chromatic noise.
+    The paper linearises sRGB input first; this function works on the values
+    it is given.
+    """
+    if sprays <= 0 or points <= 0:
+        raise ValueError("sprays and points must be positive")
+    if alpha <= 0:
+        raise ValueError("alpha must be positive")
+    planes = _planes(nimg)
+    out = np.empty_like(planes)
+    if seed is None:
+        seed = int(np.random.randint(0, 2 ** 32, dtype=np.uint64))
+    libcutil.calc_race(pointer(_rgbimage(planes)), pointer(_rgbimage(out)), int(sprays), int(points),
+                       float(radius) if radius else 0.0, float(alpha), 1 if regularize else 0,
+                       c_uint(int(seed) & 0xFFFFFFFF), int(workers) if workers else 0)
+    return _to_image(out)
+
+
+# ---------------------------------------------------------------------------
+# grayness index (Qian et al. 2019)
+# ---------------------------------------------------------------------------
+def _log_kernel(size=5, sigma=0.5):
+    """Laplacian of Gaussian filter as MATLAB's fspecial('log', size, sigma)."""
+    r = (size - 1) / 2.0
+    y, x = np.mgrid[-r:r + 1, -r:r + 1]
+    g = np.exp(-(x * x + y * y) / (2.0 * sigma * sigma))
+    g /= g.sum()
+    k = (x * x + y * y - 2.0 * sigma * sigma) / sigma ** 4 * g
+    return k - k.mean()
+
+
+def _convolve2d_same(f, kernel):
+    """2-D 'same' convolution with reflected borders (small kernels)."""
+    kh, kw = kernel.shape
+    ry, rx = kh // 2, kw // 2
+    padded = np.pad(f, ((ry, ry), (rx, rx)), mode="reflect")
+    out = np.zeros_like(f)
+    for i in range(kh):
+        for j in range(kw):
+            out += kernel[kh - 1 - i, kw - 1 - j] * padded[i:i + f.shape[0], j:j + f.shape[1]]
+    return out
+
+
+def _box_filter(f, size):
+    k = np.ones((size, size)) / float(size * size)
+    return _convolve2d_same(f, k)
+
+
+def grayness_index(nimg, epsilon=1e-4, log_size=5, log_sigma=0.5, average_size=7):
+    """
+    Grayness index map of Y. Qian, J.-K. Kamarainen, J. Nikkanen and J. Matas,
+    "On Finding Gray Pixels", CVPR 2019 (eq. 11, 12 and the 7x7 averaging).
+
+    GI = || ( C{log I_R - log |I|}, C{log I_B - log |I|} ) ||  with
+    |I| = I_R + I_G + I_B and C a Laplacian of Gaussian filter; pixels whose
+    local contrast C{log I_c} is below ``epsilon`` in any channel carry no
+    spatial cue and get an infinite index.  Smaller means greyer.
+    """
+    f = np.asarray(nimg).astype(np.float64)
+    if f.ndim != 3 or f.shape[2] != 3:
+        raise ValueError("expected an (height, width, 3) RGB array")
+    f = f + 1.0  # avoid log(0); the paper assumes black-level corrected data
+    kernel = _log_kernel(log_size, log_sigma)
+    contrast = [_convolve2d_same(np.log(f[..., c]), kernel) for c in range(3)]
+    lum = _convolve2d_same(np.log(f.sum(axis=2)), kernel)
+    gi = np.hypot(contrast[0] - lum, contrast[2] - lum)
+    no_cue = (np.abs(contrast[0]) < epsilon) | (np.abs(contrast[1]) < epsilon) | (np.abs(contrast[2]) < epsilon)
+    gi = _box_filter(gi, average_size)
+    gi[no_cue] = np.inf
+    return gi
+
+
+def estimate_illuminant_grayness_index(nimg, fraction=0.001, epsilon=1e-4, saturation_threshold=255):
+    """
+    Illuminant estimate of Qian et al. 2019: the mean colour of the
+    ``fraction`` pixels with the smallest grayness index (0.1% in the paper).
+    Returns an array (3,).
+    """
+    nimg = np.asarray(nimg)
+    gi = grayness_index(nimg, epsilon=epsilon)
+    valid = _valid_mask(nimg, saturation_threshold) & np.isfinite(gi)
+    if not valid.any():
+        return np.ones(3)
+    flat = np.where(valid, gi, np.inf).ravel()
+    k = max(int(round(valid.sum() * fraction)), 1)
+    idx = np.argpartition(flat, k - 1)[:k]
+    e = nimg.reshape(-1, 3)[idx].astype(np.float64).mean(axis=0)
+    return e if e.sum() > 0 else np.ones(3)
+
+
+def gray_pixel(nimg, fraction=0.001, epsilon=1e-4, saturation_threshold=255):
+    """White balance with the grayness index illuminant estimate (Qian et al. 2019)."""
+    nimg = np.asarray(nimg)
+    e = estimate_illuminant_grayness_index(nimg, fraction=fraction, epsilon=epsilon,
+                                           saturation_threshold=saturation_threshold)
+    return _apply_gains(nimg, _gains_from_illuminant(e))
+
+
+# ---------------------------------------------------------------------------
+# weighted grey edge (Gijsenij, Gevers, van de Weijer 2012)
+# ---------------------------------------------------------------------------
+def _edge_weights(f, dx, dy, weighting):
+    """
+    Photometric edge weights of Gijsenij et al. 2012.
+
+    f: (H, W, 3) image, dx/dy: (H, W, 3) Gaussian derivatives.
+    specular: energy of the derivative along the white direction (1,1,1)/sqrt(3)
+    shadow:   energy along the pixel's own colour direction
+    material: energy orthogonal to both (shadow-shading-specular quasi-invariant)
+    each divided by the total derivative energy.
+    """
+    total = np.sqrt((dx * dx).sum(axis=2) + (dy * dy).sum(axis=2))
+    white = np.full(3, 1.0 / np.sqrt(3.0))
+    if weighting == "specular":
+        ox, oy = dx @ white, dy @ white
+        energy = np.hypot(ox, oy)
+    else:
+        norm = np.linalg.norm(f, axis=2, keepdims=True)
+        fhat = np.where(norm > 0, f / np.where(norm > 0, norm, 1.0), white)
+        sx, sy = (dx * fhat).sum(axis=2), (dy * fhat).sum(axis=2)
+        if weighting == "shadow":
+            energy = np.hypot(sx, sy)
+        elif weighting == "material":
+            b = np.cross(fhat, white)
+            bnorm = np.linalg.norm(b, axis=2, keepdims=True)
+            b = np.where(bnorm > 0, b / np.where(bnorm > 0, bnorm, 1.0), 0.0)
+            hx, hy = (dx * b).sum(axis=2), (dy * b).sum(axis=2)
+            rest = total * total - hx * hx - hy * hy
+            energy = np.sqrt(np.maximum(rest, 0.0))
+        else:
+            raise ValueError("weighting must be 'specular', 'shadow' or 'material'")
+    with np.errstate(invalid="ignore", divide="ignore"):
+        w = np.where(total > 0, energy / np.where(total > 0, total, 1.0), 0.0)
+    return np.clip(w, 0.0, 1.0)
+
+
+def estimate_illuminant_weighted_grey_edge(nimg, weighting="specular", kappa=10.0, p=1, sigma=2.0,
+                                           iterations=10, tolerance=0.1, saturation_threshold=255):
+    """
+    A. Gijsenij, T. Gevers and J. van de Weijer, "Improving Color Constancy by
+    Photometric Edge Weighting", IEEE Trans. PAMI 34(5), 2012.
+
+    Weighted grey edge, eq. (7):  e_c ~ ( mean | w(f)^kappa  |grad f_c| |^p )^(1/p)
+    with w the specular (default), shadow or material edge weight, applied
+    iteratively (Algorithm 1): the image is corrected with the current
+    estimate, weights and estimate are recomputed and the estimates
+    multiplied, until the estimate moves less than ``tolerance`` degrees or
+    ``iterations`` passes.  kappa=10, p=1, sigma=2 are the defaults of the
+    authors' reference implementation.  Returns an array (3,).
+    """
+    nimg = np.asarray(nimg)
+    f0 = nimg.astype(np.float64)
+    if f0.ndim != 3 or f0.shape[2] != 3:
+        raise ValueError("expected an (height, width, 3) RGB array")
+    if sigma <= 0:
+        raise ValueError("sigma must be positive")
+    radius = int(np.ceil(3.0 * sigma))
+    mask = _valid_mask(nimg, saturation_threshold, dilate=radius)
+    border = np.zeros_like(mask)
+    border[radius:-radius or None, radius:-radius or None] = True
+    mask &= border
+    if not mask.any():
+        mask = np.ones_like(mask)
+    g, g1, _ = _gaussian_kernels(sigma)
+    estimate = np.ones(3)
+    for _ in range(max(int(iterations), 1)):
+        f = f0 / (estimate / estimate.mean())
+        dx = np.stack([_convolve_separable(f[..., c], g, g1) for c in range(3)], axis=-1)
+        dy = np.stack([_convolve_separable(f[..., c], g1, g) for c in range(3)], axis=-1)
+        w = _edge_weights(f, dx, dy, weighting) ** kappa
+        grad = np.hypot(dx, dy)
+        step = np.array([_minkowski_norm((w * grad[..., c])[mask], p) for c in range(3)])
+        if not np.all(step > 0):
+            break
+        new = estimate * step
+        new /= np.linalg.norm(new)
+        cos = np.clip(np.dot(new, estimate / np.linalg.norm(estimate)), -1.0, 1.0)
+        estimate = new
+        if np.degrees(np.arccos(cos)) < tolerance:
+            break
+    return estimate
+
+
+def weighted_grey_edge(nimg, weighting="specular", kappa=10.0, p=1, sigma=2.0, iterations=10,
+                       tolerance=0.1, saturation_threshold=255):
+    """White balance with the iterative weighted grey edge estimate (Gijsenij et al. 2012)."""
+    nimg = np.asarray(nimg)
+    e = estimate_illuminant_weighted_grey_edge(nimg, weighting=weighting, kappa=kappa, p=p, sigma=sigma,
+                                               iterations=iterations, tolerance=tolerance,
+                                               saturation_threshold=saturation_threshold)
+    return _apply_gains(nimg, _gains_from_illuminant(e))

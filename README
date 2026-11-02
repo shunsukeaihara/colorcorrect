@@ -101,10 +101,31 @@ impement algorithms::
                      seed(default:None),workers(default:None)
               Provenzi et al. 2007; cost grows with sprays*points*pixels (C++, threaded).
 
+    RACE / sigma-RACE
+              colorcorrect.algorithm.race
+              usage: image,sprays(default:10),points(default:250),alpha(default:20),
+                     regularize(default:True),radius(default:None),seed(default:None),workers(default:None)
+              Provenzi et al. 2008: spray fusion of RSR (local white patch) and ACE
+              (local grey world); regularize=True is sigma-RACE, which keeps uniform
+              areas by mixing with the original according to local/global contrast.
+    gray pixel / grayness index
+              colorcorrect.algorithm.gray_pixel
+              usage: image,fraction(default:0.001),epsilon(default:1e-4),saturation_threshold(default:255)
+              Qian et al. 2019: illuminant = mean of the 0.1% pixels with the smallest
+              grayness index (grayness_index returns the map,
+              estimate_illuminant_grayness_index the estimate).
+    weighted grey edge
+              colorcorrect.algorithm.weighted_grey_edge
+              usage: image,weighting(default:"specular"),kappa(default:10),p(default:1),sigma(default:2.0),
+                     iterations(default:10),tolerance(default:0.1),saturation_threshold(default:255)
+              Gijsenij et al. 2012: grey edge with photometric edge weights
+              (specular / shadow / material), applied iteratively.
+              estimate_illuminant_weighted_grey_edge returns the estimate itself.
+
 All functions take and return (height, width, 3) uint8 numpy arrays and never
 modify their input.  The illuminant estimation methods (grey world, shades of
-gray, grey edge, PCA) assume a diagonal (von Kries) colour cast and keep G as
-the reference channel.
+gray, grey edge, weighted grey edge, PCA, gray pixel) assume a diagonal
+(von Kries) colour cast and keep G as the reference channel.
 
 sample usage::
 
@@ -127,3 +148,6 @@ References::
     D. Jobson, Z. Rahman and G. Woodell, "A multiscale retinex for bridging the gap between color images and the human observation of scenes", IEEE Trans. Image Processing, vol. 6, no. 7, 1997.
     A. Petro, C. Sbert and J.-M. Morel, "Multiscale Retinex", Image Processing On Line, 2014.
     E. Provenzi, M. Fierro, A. Rizzi, L. De Carli, D. Gadia and D. Marini, "Random Spray Retinex", IEEE Trans. Image Processing, vol. 16, no. 1, 2007.
+    E. Provenzi, C. Gatta, M. Fierro and A. Rizzi, "A Spatially Variant White-Patch and Gray-World Method for Color Image Enhancement Driven by Local Contrast", IEEE Trans. PAMI, vol. 30, no. 10, 2008.
+    Y. Qian, J.-K. Kamarainen, J. Nikkanen and J. Matas, "On Finding Gray Pixels", CVPR, 2019.
+    A. Gijsenij, T. Gevers and J. van de Weijer, "Improving Color Constancy by Photometric Edge Weighting", IEEE Trans. PAMI, vol. 34, no. 5, 2012.

@@ -29,6 +29,9 @@ ALL_ALGORITHMS = [
     cca.pca_color_constancy,
     cca.multi_scale_retinex,
     cca.random_spray_retinex,
+    cca.race,
+    cca.gray_pixel,
+    cca.weighted_grey_edge,
 ]
 
 ILLUMINANT_ESTIMATORS = [
@@ -39,6 +42,10 @@ ILLUMINANT_ESTIMATORS = [
     lambda img: cca.grey_edge(img, order=1),
     lambda img: cca.grey_edge(img, order=2),
     cca.pca_color_constancy,
+    cca.gray_pixel,
+    cca.weighted_grey_edge,
+    lambda img: cca.weighted_grey_edge(img, weighting="shadow"),
+    lambda img: cca.weighted_grey_edge(img, weighting="material"),
 ]
 
 
@@ -329,3 +336,45 @@ class NewAlgorithmsTestCase(TestCase):
         self.assertTrue((a.astype(int) >= img.astype(int) * 255 // max(int(img.max()), 1) - 1).all())
         with self.assertRaises(ValueError):
             cca.random_spray_retinex(img, sprays=0)
+
+    def test_grayness_index(self):
+        gi = cca.grayness_index(self.cast)
+        self.assertEqual(gi.shape, self.cast.shape[:2])
+        # a flat image has no spatial cue anywhere
+        self.assertTrue(np.isinf(cca.grayness_index(np.full((30, 40, 3), 90, dtype=np.uint8))).all())
+        # grey pixels with texture get a lower index than coloured ones
+        img = np.full((40, 80, 3), 120, dtype=np.uint8)
+        tex = self.rng.integers(-40, 40, (40, 80))
+        img[:, :40] = np.clip(120 + tex[:, :40, None], 0, 255)                       # grey texture
+        img[:, 40:] = np.clip(np.stack([160 + tex[:, 40:], 120 + 0.3 * tex[:, 40:], 80 - 0.5 * tex[:, 40:]], -1), 0, 255)
+        gi = cca.grayness_index(img)
+        self.assertLess(np.median(gi[:, 5:35]), np.median(gi[:, 45:75]))
+        e = cca.estimate_illuminant_grayness_index(img)
+        np.testing.assert_allclose(e / e[1], [1.0, 1.0, 1.0], atol=0.05)
+
+    def test_weighted_grey_edge_options(self):
+        e_single = cca.estimate_illuminant_weighted_grey_edge(self.cast, iterations=1)
+        e_iter = cca.estimate_illuminant_weighted_grey_edge(self.cast, iterations=10)
+        for e in (e_single, e_iter):
+            np.testing.assert_allclose(e / e[1], [1.3, 1.0, 0.7], rtol=0.02)
+        with self.assertRaises(ValueError):
+            cca.weighted_grey_edge(self.cast, weighting="nope")
+
+    def test_race(self):
+        img = np.asarray(Image.fromarray(self.img).resize((80, 60), Image.BILINEAR))
+        a = cca.race(img, seed=5, sprays=4, points=50)
+        b = cca.race(img, seed=5, sprays=4, points=50, workers=1)
+        self.assertTrue(np.array_equal(a, b))
+        self.assertEqual(a.dtype, np.uint8)
+        # the three ideal cases of the paper: white stays white, black stays
+        # black, a uniform grey is kept by sigma-RACE (no local contrast)
+        white = np.full((20, 30, 3), 255, dtype=np.uint8)
+        black = np.zeros((20, 30, 3), dtype=np.uint8)
+        grey = np.full((20, 30, 3), 128, dtype=np.uint8)
+        self.assertTrue((cca.race(white, seed=1) == 255).all())
+        self.assertTrue((cca.race(black, seed=1) == 0).all())
+        self.assertTrue((cca.race(grey, seed=1) == 128).all())
+        # plain RACE maps a uniform area to 3/4 (RSR 1, spray ACE 1/2)
+        self.assertTrue((cca.race(grey, seed=1, regularize=False) == 191).all())
+        with self.assertRaises(ValueError):
+            cca.race(img, alpha=0)

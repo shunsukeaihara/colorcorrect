@@ -249,72 +249,134 @@ void calc_ace(rgbimage_t* img, int samples, double slope, double limit,
  * Random Spray Retinex
  *   E. Provenzi, M. Fierro, A. Rizzi, L. De Carli, D. Gadia, D. Marini,
  *   "Random Spray Retinex", IEEE Trans. Image Processing 16(1), 2007.
+ * RACE / sigma-RACE
+ *   E. Provenzi, C. Gatta, M. Fierro, A. Rizzi, "A Spatially Variant
+ *   White-Patch and Gray-World Method for Color Image Enhancement Driven by
+ *   Local Contrast", IEEE Trans. PAMI 30(10), 2008.
  *
  * The Retinex paths are replaced by "sprays": for a target pixel x, n points
  * are drawn around it with a radial density proportional to 1/r (r uniform
  * in [0, R], angle uniform), points falling outside the image are discarded.
- * The lightness of x for one spray is I_c(x) / max_{j in spray} I_c(j); the
- * final value is the average over N sprays.
  *
- * Offsets are drawn from a large precomputed pool (one random start index per
- * pixel and spray) so that every pixel still gets its own sprays without
- * paying for a trigonometric RNG per point.
+ *   RSR  (2007, eq. 6):  L(i) = 1/N sum_k I(i) / max_{j in S_k(i)} I(j)
+ *   RACE (2008, eq. 13): L(i) = 1/N sum_k 1/2 ( I(i)/I(H_k)
+ *                               + 1/n~_k sum_{j in S_k(i)\{i}} s~_a(I(i)-I(j)) )
+ *   with s~_a(d) = 0 for d <= -1/(2a), 1/2 + a d for |d| < 1/(2a), 1 above
+ *   sigma-RACE (eq. 23): every spray term is mixed with the original value,
+ *     (2 sigma_k(i))^(sigma_min/sigma_max) L_k + (1 - ...) I(i),
+ *   sigma_k(i) being the standard deviation of the intensities in the spray.
+ * Intensities are normalised to [0, 1] and every channel is processed on
+ * its own.  Offsets come from a large precomputed pool (one random start
+ * index per pixel and spray) so that every pixel gets its own sprays without
+ * a trigonometric RNG per point.
  */
 namespace {
 
-struct RsrOffsets {
+struct SprayOffsets {
   std::vector<int> dx, dy;
 };
 
-void rsr_rows(const rgbimage_t* in, rgbimage_t* out, int y0, int y1,
-              int sprays, int points, const RsrOffsets& pool,
-              unsigned int seed) {
+enum SprayMode { SPRAY_RSR = 0, SPRAY_RACE = 1 };
+
+struct SprayParams {
+  SprayMode mode;
+  int sprays, points;
+  double alpha;        // RACE slope
+  bool regularize;     // sigma-RACE
+  double gamma;        // sigma_min / sigma_max exponent of the regulariser
+};
+
+void spray_rows(const rgbimage_t* in, rgbimage_t* out, int y0, int y1,
+                const SprayParams& prm, const SprayOffsets& pool,
+                unsigned int seed) {
   const int W = in->width, H = in->height;
   const unsigned char* ich[3] = {in->r, in->g, in->b};
   unsigned char* och[3] = {out->r, out->g, out->b};
   const size_t pool_size = pool.dx.size();
+  std::vector<size_t> members;
+  members.reserve(prm.points + 1);
   for (int y = y0; y < y1; ++y) {
     // one generator per row so the result does not depend on the threading
     std::mt19937 rng(seed + unsigned(y));
     for (int x = 0; x < W; ++x) {
       const size_t p = size_t(y) * W + x;
       double acc[3] = {0.0, 0.0, 0.0};
-      for (int s = 0; s < sprays; ++s) {
+      for (int s = 0; s < prm.sprays; ++s) {
         size_t idx = rng() % pool_size;
-        // the pixel itself always belongs to its spray
-        unsigned char mx[3] = {ich[0][p], ich[1][p], ich[2][p]};
-        for (int k = 0; k < points; ++k) {
+        // collect the spray members inside the image (the pixel itself
+        // always belongs to its spray)
+        members.clear();
+        for (int k = 0; k < prm.points; ++k) {
           const int xx = x + pool.dx[idx], yy = y + pool.dy[idx];
           if (++idx == pool_size) idx = 0;
           if (xx < 0 || xx >= W || yy < 0 || yy >= H) continue;
-          const size_t q = size_t(yy) * W + xx;
-          for (int c = 0; c < 3; ++c) mx[c] = std::max(mx[c], ich[c][q]);
+          members.push_back(size_t(yy) * W + xx);
         }
-        for (int c = 0; c < 3; ++c)
-          acc[c] += mx[c] > 0 ? double(ich[c][p]) / double(mx[c]) : 1.0;
+        // one pass over the members for all three channels (one gather per
+        // member instead of three)
+        float v[3], mx[3], sum[3], sumsq[3], ace[3] = {0.0f, 0.0f, 0.0f};
+        for (int c = 0; c < 3; ++c) {
+          v[c] = ich[c][p] * (1.0f / 255.0f);
+          mx[c] = v[c];
+          sum[c] = v[c];
+          sumsq[c] = v[c] * v[c];
+        }
+        const float alpha = float(prm.alpha), half = 0.5f / alpha;
+        for (size_t m = 0; m < members.size(); ++m) {
+          const size_t q = members[m];
+          for (int c = 0; c < 3; ++c) {
+            const float u = ich[c][q] * (1.0f / 255.0f);
+            mx[c] = std::max(mx[c], u);
+            if (prm.mode == SPRAY_RACE) {
+              const float d = v[c] - u;
+              ace[c] += d <= -half ? 0.0f : (d >= half ? 1.0f : 0.5f + alpha * d);
+              sum[c] += u;
+              sumsq[c] += u * u;
+            }
+          }
+        }
+        for (int c = 0; c < 3; ++c) {
+          double l;
+          if (prm.mode == SPRAY_RSR) {
+            l = mx[c] > 0.0f ? double(v[c]) / mx[c] : 1.0;
+          } else {
+            const double wp = mx[c] > 0.0f ? double(v[c]) / mx[c] : 1.0;
+            const double gw = members.empty() ? 0.5 : double(ace[c]) / double(members.size());
+            l = 0.5 * (wp + gw);
+            if (prm.regularize) {
+              const double n = double(members.size() + 1);
+              const double mean = sum[c] / n;
+              double var = sumsq[c] / n - mean * mean;
+              if (var < 0.0) var = 0.0;
+              const double sigma = sqrt(var);                 // in [0, 1/2]
+              const double beta = pow(std::min(2.0 * sigma, 1.0), prm.gamma);
+              l = beta * l + (1.0 - beta) * v[c];
+            }
+          }
+          acc[c] += l;
+        }
       }
       for (int c = 0; c < 3; ++c) {
-        double v = acc[c] / sprays * 255.0 + 0.5;
+        double v = acc[c] / prm.sprays * 255.0 + 0.5;
         if (v > 255.0) v = 255.0;
+        if (v < 0.0) v = 0.0;
         och[c][p] = (unsigned char)v;
       }
     }
   }
 }
 
-}  // namespace
-
-void calc_rsr(const rgbimage_t* in, rgbimage_t* out, int sprays, int points,
-              double radius, unsigned int seed, int threads) {
+void run_sprays(const rgbimage_t* in, rgbimage_t* out, SprayParams prm,
+                double radius, unsigned int seed, int threads) {
   const int W = in->width, H = in->height;
-  if (W <= 0 || H <= 0 || sprays <= 0 || points <= 0) return;
+  if (W <= 0 || H <= 0 || prm.sprays <= 0 || prm.points <= 0) return;
   if (radius <= 0.0) radius = sqrt(double(W) * W + double(H) * H);
 
   // pool of spray offsets with radial density 1/r
   std::mt19937 rng(seed);
   std::uniform_real_distribution<double> uni(0.0, 1.0);
-  const size_t pool_size = std::max<size_t>(size_t(points) * 64, 1u << 16);
-  RsrOffsets pool;
+  const size_t pool_size = std::max<size_t>(size_t(prm.points) * 64, 1u << 16);
+  SprayOffsets pool;
   pool.dx.resize(pool_size);
   pool.dy.resize(pool_size);
   const double two_pi = 6.283185307179586;
@@ -329,14 +391,51 @@ void calc_rsr(const rgbimage_t* in, rgbimage_t* out, int sprays, int points,
   if (threads <= 0) threads = 1;
   threads = std::min(threads, H);
   if (threads == 1) {
-    rsr_rows(in, out, 0, H, sprays, points, pool, seed + 1);
+    spray_rows(in, out, 0, H, prm, pool, seed + 1);
     return;
   }
   std::vector<std::thread> pool_threads;
   for (int t = 0; t < threads; ++t) {
     const int y0 = int(size_t(H) * t / threads), y1 = int(size_t(H) * (t + 1) / threads);
-    pool_threads.emplace_back(rsr_rows, in, out, y0, y1, sprays, points,
-                              std::cref(pool), seed + 1);
+    pool_threads.emplace_back(spray_rows, in, out, y0, y1, prm, std::cref(pool), seed + 1);
   }
   for (auto& th : pool_threads) th.join();
+}
+
+// sigma_min / sigma_max of the global channel standard deviations
+double global_contrast_ratio(const rgbimage_t* in) {
+  const size_t N = size_t(in->width) * size_t(in->height);
+  const unsigned char* ch[3] = {in->r, in->g, in->b};
+  double smin = DBL_MAX, smax = 0.0;
+  for (int c = 0; c < 3; ++c) {
+    double sum = 0.0, sumsq = 0.0;
+    for (size_t p = 0; p < N; ++p) {
+      const double v = ch[c][p] / 255.0;
+      sum += v;
+      sumsq += v * v;
+    }
+    const double mean = sum / double(N);
+    double var = sumsq / double(N) - mean * mean;
+    if (var < 0.0) var = 0.0;
+    const double sd = sqrt(var);
+    smin = std::min(smin, sd);
+    smax = std::max(smax, sd);
+  }
+  return smax > 0.0 ? smin / smax : 1.0;
+}
+
+}  // namespace
+
+void calc_rsr(const rgbimage_t* in, rgbimage_t* out, int sprays, int points,
+              double radius, unsigned int seed, int threads) {
+  SprayParams prm = {SPRAY_RSR, sprays, points, 0.0, false, 1.0};
+  run_sprays(in, out, prm, radius, seed, threads);
+}
+
+void calc_race(const rgbimage_t* in, rgbimage_t* out, int sprays, int points,
+               double radius, double alpha, int regularize, unsigned int seed,
+               int threads) {
+  SprayParams prm = {SPRAY_RACE, sprays, points, alpha, regularize != 0,
+                     regularize != 0 ? global_contrast_ratio(in) : 1.0};
+  run_sprays(in, out, prm, radius, seed, threads);
 }
