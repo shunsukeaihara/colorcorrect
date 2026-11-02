@@ -40,8 +40,8 @@ impement algorithms::
     retinex
         colorcorrect.algorithm.retinex
         usage: image
-    retinex with adjust
-            colorcorrect.algorithm.retinex_with_adjust
+    retinex with adjust (gray world + retinex quadratic mapping)
+            colorcorrect.algorithm.retinex_adjust (alias: retinex_with_adjust)
             usage: image
     standard deviation weighted grey world
              colorcorrect.algorithm.standard_deviation_weighted_grey_world

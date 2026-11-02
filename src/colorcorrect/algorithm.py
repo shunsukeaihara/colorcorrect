@@ -173,8 +173,10 @@ def retinex_adjust(nimg):
     return np.clip(np.rint(out), 0, 255).astype(np.uint8)
 
 
-def retinex_with_adjust(nimg):
-    return retinex_adjust(retinex(nimg))
+# The quadratic mapping already enforces the retinex (max) constraint, so a
+# retinex pass before it only added quantisation error.  Kept as an alias
+# for backwards compatibility.
+retinex_with_adjust = retinex_adjust
 
 
 # ---------------------------------------------------------------------------

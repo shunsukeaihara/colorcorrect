@@ -17,7 +17,6 @@ ALL_ALGORITHMS = [
     cca.retinex,
     cca.max_white,
     cca.retinex_adjust,
-    cca.retinex_with_adjust,
     cca.standard_deviation_weighted_grey_world,
     cca.standard_deviation_weighted_grey_world_python,
     cca.standard_deviation_and_luminance_weighted_gray_world,
@@ -110,6 +109,9 @@ class CCTestCase(TestCase):
         self.assertLess(abs(out[:, 2].mean() - out[:, 1].mean()), 1.0)
         self.assertLessEqual(abs(out[:, 0].max() - out[:, 1].max()), 1)
         self.assertLessEqual(abs(out[:, 2].max() - out[:, 1].max()), 1)
+
+    def test_retinex_with_adjust_is_an_alias(self):
+        self.assertIs(cca.retinex_with_adjust, cca.retinex_adjust)
 
     def test_retinex_adjust_never_wraps_around(self):
         # a channel whose quadratic fit overshoots 255 must be clipped, not
