@@ -8,8 +8,10 @@ sys.path.append('./test')
 version = open('VERSION').read().strip()
 
 libs = []
+compile_args = []
 if os.name == 'posix':
     libs.append('m')
+    compile_args = ['-O3', '-std=c++11']
 
 class win_build_ext(build_ext):
     def get_export_symbols(self, ext):
@@ -48,11 +50,10 @@ setup(name='colorcorrect',
               ],
               include_dirs=['cutil'],
               libraries=libs,
-              extra_compile_args=[],
+              extra_compile_args=compile_args,
           ),
       ],
-      install_requires=["numpy", "Pillow", "six"],
-      tests_require=["nose"],
-      test_suite='nose.collector',
+      install_requires=["numpy", "Pillow"],
+      python_requires=">=3.6",
       cmdclass = {"build_ext": get_build_ext()}
       )
