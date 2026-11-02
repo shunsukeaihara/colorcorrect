@@ -160,20 +160,72 @@ void delete_doubleptr(double* p) {
  * `min_distance`.  Dynamic tone reproduction scaling then stretches
  * [min R_c, max R_c] linearly to [0, 255].
  */
+namespace {
+
+// chromatic/spatial adjustment on a random subset; fills score[c][p] and the
+// per channel min/max.  nch is 1 for an aliased luminance-only call.
+void ace_scores(const rgbimage_t* img, int samples, double slope, double limit,
+                unsigned int seed, double min_distance, int nch,
+                std::vector<float>* score, double* rmin, double* rmax);
+
+}  // namespace
+
+void calc_ace_scores(const rgbimage_t* img, int samples, double slope,
+                     double limit, unsigned int seed, double min_distance,
+                     float* scores) {
+  const size_t N = size_t(img->width) * size_t(img->height);
+  if (N == 0 || samples <= 0) return;
+  const int nch = (img->g == img->r && img->b == img->r) ? 1 : 3;
+  std::vector<float> score[3];
+  double rmin[3], rmax[3];
+  ace_scores(img, samples, slope, limit, seed, min_distance, nch, score, rmin, rmax);
+  for (int c = 0; c < nch; ++c)
+    std::copy(score[c].begin(), score[c].end(), scores + size_t(c) * N);
+}
+
 void calc_ace(rgbimage_t* img, int samples, double slope, double limit,
               unsigned int seed, double min_distance) {
   const int W = img->width, H = img->height;
   const size_t N = size_t(W) * size_t(H);
   if (N == 0 || samples <= 0) return;
+  unsigned char* ch[3] = {img->r, img->g, img->b};
+  const int nch = (img->g == img->r && img->b == img->r) ? 1 : 3;
+  std::vector<float> score[3];
+  double rmin[3], rmax[3];
+  ace_scores(img, samples, slope, limit, seed, min_distance, nch, score, rmin, rmax);
+
+  // dynamic tone reproduction scaling: [min, max] -> [0, 255]
+  for (int c = 0; c < nch; ++c) {
+    const double range = rmax[c] - rmin[c];
+    if (range <= 0.0) {
+      // flat channel: no contrast to stretch, map to middle grey
+      for (size_t p = 0; p < N; ++p) ch[c][p] = 128;
+      continue;
+    }
+    const double scale = 255.0 / range;
+    for (size_t p = 0; p < N; ++p) {
+      double v = (score[c][p] - rmin[c]) * scale + 0.5;
+      if (v < 0.0) v = 0.0;
+      if (v > 255.0) v = 255.0;
+      ch[c][p] = (unsigned char)v;
+    }
+  }
+}
+
+namespace {
+
+void ace_scores(const rgbimage_t* img, int samples, double slope, double limit,
+                unsigned int seed, double min_distance, int nch,
+                std::vector<float>* score, double* rmin, double* rmax) {
+  const int W = img->width, H = img->height;
+  const size_t N = size_t(W) * size_t(H);
 
   // random subset of pixel coordinates / values
   std::mt19937 rng(seed);
   std::vector<int> sx(samples), sy(samples);
   std::vector<int> sv[3];
   for (int c = 0; c < 3; ++c) sv[c].resize(samples);
-  unsigned char* ch[3] = {img->r, img->g, img->b};
-  // a luminance-only call passes the same plane three times; compute it once
-  const int nch = (img->g == img->r && img->b == img->r) ? 1 : 3;
+  const unsigned char* ch[3] = {img->r, img->g, img->b};
   for (int s = 0; s < samples; ++s) {
     sx[s] = int(rng() % (unsigned int)W);
     sy[s] = int(rng() % (unsigned int)H);
@@ -190,10 +242,11 @@ void calc_ace(rgbimage_t* img, int samples, double slope, double limit,
     sat[d + 255] = float(v / limit);
   }
 
-  std::vector<float> score[3];
-  for (int c = 0; c < 3; ++c) score[c].resize(N);
-  double rmax[3] = {-DBL_MAX, -DBL_MAX, -DBL_MAX};
-  double rmin[3] = {DBL_MAX, DBL_MAX, DBL_MAX};
+  for (int c = 0; c < nch; ++c) {
+    score[c].assign(N, 0.0f);
+    rmax[c] = -DBL_MAX;
+    rmin[c] = DBL_MAX;
+  }
 
   std::vector<float> invd(samples);
   const float min_d2 = float(min_distance > 0.0 ? min_distance * min_distance : 0.0);
@@ -226,24 +279,9 @@ void calc_ace(rgbimage_t* img, int samples, double slope, double limit,
       }
     }
   }
-
-  // dynamic tone reproduction scaling: [min, max] -> [0, 255]
-  for (int c = 0; c < nch; ++c) {
-    const double range = rmax[c] - rmin[c];
-    if (range <= 0.0) {
-      // flat channel: no contrast to stretch, map to middle grey
-      for (size_t p = 0; p < N; ++p) ch[c][p] = 128;
-      continue;
-    }
-    const double scale = 255.0 / range;
-    for (size_t p = 0; p < N; ++p) {
-      double v = (score[c][p] - rmin[c]) * scale + 0.5;
-      if (v < 0.0) v = 0.0;
-      if (v > 255.0) v = 255.0;
-      ch[c][p] = (unsigned char)v;
-    }
-  }
 }
+
+}  // namespace
 
 /*
  * Random Spray Retinex

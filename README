@@ -74,6 +74,31 @@ impement algorithms::
 
               >>> cca.automatic_color_equalization(cca.retinex_with_adjust(img), preserve_chroma=True)
 
+              alpha gives the slope in the papers' normalised units (overrides
+              slope/limit); scaling selects the tone reproduction scaling:
+              "minmax" (linear), "wp_gw" (R=0 -> middle grey), "wp_gw_black"
+              and "keep_gray" (Chambah et al. 2003).
+    film restoration ACE
+              colorcorrect.algorithm.film_restoration_ace
+              usage: image,saturation(default:0.2),scaling(default:"keep_gray"),
+                     enhance_saturation(default:None),**ace keyword arguments
+              Chambah, Rizzi, Gatta, Besserer, Marini 2003: ACE tuned for faded film
+              (saturation shape 0.2, WP+GW (black) scaling centred on the original
+              mean grey level, "keep original gray"),
+              optionally preceded by saturation_enhancement(image, factor) which
+              stretches the a*b* chroma cloud about its centre along its principal axes.
+    complementary cast removal
+              colorcorrect.algorithm.complementary_cast_removal
+              usage: image,k
+              Machidon & Ivanovici 2018: add k times the complement of the mean colour
+              (the paper fits k per film stock from a colour chart, 0.28 .. 0.36).
+              color_chart_transform / apply_color_transform implement the paper's
+              3x3 colour correction from a colour chart.
+    simplest color balance
+              colorcorrect.algorithm.simplest_color_balance
+              usage: image,clip(default:0.01)
+              Limare et al. 2011: clip 1% at both ends of each channel and stretch.
+
     shades of gray
               colorcorrect.algorithm.shades_of_gray
               usage: image,p(default:6),saturation_threshold(default:255)
@@ -151,3 +176,6 @@ References::
     E. Provenzi, C. Gatta, M. Fierro and A. Rizzi, "A Spatially Variant White-Patch and Gray-World Method for Color Image Enhancement Driven by Local Contrast", IEEE Trans. PAMI, vol. 30, no. 10, 2008.
     Y. Qian, J.-K. Kamarainen, J. Nikkanen and J. Matas, "On Finding Gray Pixels", CVPR, 2019.
     A. Gijsenij, T. Gevers and J. van de Weijer, "Improving Color Constancy by Photometric Edge Weighting", IEEE Trans. PAMI, vol. 34, no. 5, 2012.
+    M. Chambah, A. Rizzi, C. Gatta, B. Besserer and D. Marini, "Perceptual approach for unsupervised digital color restoration of cinematographic archives", Proc. SPIE 5008, Color Imaging VIII, 2003.
+    O.-M. Machidon and M. Ivanovici, "Digital color restoration for the preservation of reversal film heritage", Journal of Cultural Heritage, vol. 33, 2018.
+    N. Limare, J.-L. Lisani, J.-M. Morel, A. B. Petro and C. Sbert, "Simplest Color Balance", Image Processing On Line, 2011.

@@ -22,6 +22,13 @@ extern "C"{
      to a pixel cannot dominate its result. */
   void calc_ace(rgbimage_t* img, int samples, double slope, double limit,
                 unsigned int seed, double min_distance);
+  /* Same Monte-Carlo chromatic/spatial adjustment, but the normalised scores
+     R_c(p) in [-1, 1] are written to scores (3 * width * height floats,
+     plane after plane) and the image is left untouched, so that any tone
+     reproduction scaling can be applied by the caller. */
+  void calc_ace_scores(const rgbimage_t* img, int samples, double slope,
+                       double limit, unsigned int seed, double min_distance,
+                       float* scores);
   void delete_doubleptr(double* p);
   /* Random Spray Retinex: for every pixel `sprays` random sprays of `points`
      pixels with radial density 1/r (radius `radius`) are drawn; the output

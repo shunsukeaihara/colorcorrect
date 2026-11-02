@@ -32,6 +32,10 @@ ALL_ALGORITHMS = [
     cca.race,
     cca.gray_pixel,
     cca.weighted_grey_edge,
+    cca.film_restoration_ace,
+    lambda img: cca.complementary_cast_removal(img, 0.3),
+    cca.simplest_color_balance,
+    cca.saturation_enhancement,
 ]
 
 ILLUMINANT_ESTIMATORS = [
@@ -378,3 +382,97 @@ class NewAlgorithmsTestCase(TestCase):
         self.assertTrue((cca.race(grey, seed=1, regularize=False) == 191).all())
         with self.assertRaises(ValueError):
             cca.race(img, alpha=0)
+
+
+class FilmRestorationTestCase(TestCase):
+    def setUp(self):
+        self.img = from_pil(Image.open(TEST_IMAGE))
+        self.small = np.asarray(Image.fromarray(self.img).resize((64, 48), Image.BILINEAR))
+        self.rng = np.random.default_rng(5)
+
+    def test_lab_round_trip(self):
+        img = self.rng.integers(0, 256, (30, 40, 3), dtype=np.uint8)
+        back = cca.lab_to_rgb(cca.rgb_to_lab(img))
+        self.assertLessEqual(np.abs(back.astype(int) - img.astype(int)).max(), 1)
+        white = cca.rgb_to_lab(np.array([[[255, 255, 255]]], dtype=np.uint8))[0, 0]
+        np.testing.assert_allclose(white, [100.0, 0.0, 0.0], atol=0.01)
+
+    def test_ace_scalings(self):
+        scores = np.array([np.linspace(-0.5, 1.0, 12).reshape(3, 4)])
+        centers = 60.0
+        minmax = cca._ace_scale(scores, "minmax")
+        self.assertEqual((minmax.min(), minmax.max()), (0, 255))
+        wp = cca._ace_scale(scores, "wp_gw")
+        self.assertEqual(wp.max(), 255)
+        self.assertEqual(wp[0, 0, 0], 64)  # 127.5 - 0.5 * 127.5
+        black = cca._ace_scale(scores, "wp_gw_black")
+        self.assertEqual((black.min(), black.max()), (0, 255))
+        keep = cca._ace_scale(scores, "keep_gray", centers)
+        self.assertEqual((keep.min(), keep.max()), (0, 255))
+        # R = 0 maps onto the original mean
+        zero = np.array([[[0.0, 0.5, -0.5]]])
+        self.assertEqual(cca._ace_scale(zero, "keep_gray", centers)[0, 0, 0], 60)
+        self.assertEqual(cca._ace_scale(zero, "wp_gw_black")[0, 0, 0], 128)
+        with self.assertRaises(ValueError):
+            cca._ace_scale(scores, "nope")
+
+    def test_ace_alpha_and_sampling_scores(self):
+        a = cca.automatic_color_equalization(self.small, alpha=2.55)
+        b = cca.automatic_color_equalization(self.small, slope=10, limit=1000)
+        self.assertTrue(np.array_equal(a, b))
+        # the sampled scores path gives the same image as before through min-max
+        s1 = cca.automatic_color_equalization(self.small, method="sampling", seed=4)
+        scores = cca._ace_scores(cca._planes(self.small), 10, 1000, 500, "sampling", 16, 4, None, None)
+        s2 = cca._to_image(cca._ace_scale(scores))
+        self.assertTrue(np.array_equal(s1, s2))
+        for scaling in cca.ACE_SCALINGS:
+            out = cca.automatic_color_equalization(self.small, method="sampling", seed=4, scaling=scaling)
+            self.assertEqual(out.shape, self.small.shape)
+
+    def test_film_restoration_ace(self):
+        out = cca.film_restoration_ace(self.small)
+        self.assertEqual(out.dtype, np.uint8)
+        same = cca.automatic_color_equalization(self.small, alpha=5.0, scaling="keep_gray")
+        self.assertTrue(np.array_equal(out, same))
+        # keep_gray maps R = 0 of every channel onto the original mean grey
+        # level, so a global cast is neutralised while the key is kept
+        grey = np.clip(np.stack([np.linspace(40, 200, 64)] * 48), 0, 255)
+        cast = np.clip(np.stack([grey * 1.3, grey, grey * 0.7], -1), 0, 255).astype(np.uint8)
+        means = cca.film_restoration_ace(cast, levels=64).reshape(-1, 3).mean(axis=0)
+        self.assertLess(np.ptp(means), 3.0)
+        with self.assertRaises(ValueError):
+            cca.film_restoration_ace(self.small, saturation=0)
+
+    def test_saturation_enhancement_keeps_mean_chroma(self):
+        out = cca.saturation_enhancement(self.img, 1.5)
+        ab0 = cca.rgb_to_lab(self.img)[..., 1:].reshape(-1, 2)
+        ab1 = cca.rgb_to_lab(out)[..., 1:].reshape(-1, 2)
+        np.testing.assert_allclose(ab1.mean(axis=0), ab0.mean(axis=0), atol=1.0)
+        self.assertGreater(ab1.std(axis=0).sum(), 1.3 * ab0.std(axis=0).sum())
+        with self.assertRaises(ValueError):
+            cca.saturation_enhancement(self.img, 0)
+
+    def test_complementary_cast_removal(self):
+        f = self.img.astype(np.float64)
+        mean = f.reshape(-1, 3).mean(axis=0)
+        out = cca.complementary_cast_removal(self.img, k=0.3)
+        expected = np.clip(np.rint(f + 0.3 * (255.0 - mean)), 0, 255).astype(np.uint8)
+        self.assertTrue(np.array_equal(out, expected))
+        with self.assertRaises(ValueError):
+            cca.complementary_cast_removal(self.img, k=1.0)
+
+    def test_color_chart_transform(self):
+        ref = self.rng.integers(0, 256, (10, 3)).astype(np.float64)
+        t0 = np.array([[1.2, 0.1, 0.0], [0.0, 0.9, 0.05], [0.1, 0.0, 1.1]])
+        acquired = ref @ np.linalg.inv(t0).T
+        t = cca.color_chart_transform(acquired, ref)
+        np.testing.assert_allclose(t, t0, atol=1e-8)
+        corrected = cca.apply_color_transform(acquired.reshape(2, 5, 3), t)
+        self.assertLess(np.abs(corrected.astype(float) - ref.reshape(2, 5, 3)).max(), 1.0)
+
+    def test_simplest_color_balance(self):
+        out = cca.simplest_color_balance(self.img, clip=0.01).reshape(-1, 3)
+        self.assertTrue((out.max(axis=0) == 255).all())
+        self.assertTrue((out.min(axis=0) == 0).all())
+        with self.assertRaises(ValueError):
+            cca.simplest_color_balance(self.img, clip=0.5)

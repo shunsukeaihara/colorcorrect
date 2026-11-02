@@ -42,6 +42,8 @@ libcutil.calc_lwgw.argtypes = [POINTER(RGBImage), c_int, c_int]
 libcutil.calc_lwgw.restype = c_void_p
 libcutil.delete_doubleptr.argtypes = [c_void_p]
 libcutil.calc_ace.argtypes = [POINTER(RGBImage), c_int, c_double, c_double, c_uint, c_double]
+libcutil.calc_ace_scores.argtypes = [POINTER(RGBImage), c_int, c_double, c_double, c_uint, c_double,
+                                     np.ctypeslib.ndpointer(dtype=np.float32, flags="C_CONTIGUOUS")]
 libcutil.calc_rsr.argtypes = [POINTER(RGBImage), POINTER(RGBImage), c_int, c_int, c_double, c_uint, c_int]
 libcutil.calc_race.argtypes = [POINTER(RGBImage), POINTER(RGBImage), c_int, c_int, c_double, c_double,
                                c_int, c_uint, c_int]
@@ -374,15 +376,47 @@ def _ace_fft(planes, slope, limit, levels, workers=None):
     return scores
 
 
-def _ace_scale(scores):
-    """Dynamic tone reproduction scaling: [min, max] -> [0, 255] per channel."""
+ACE_SCALINGS = ("minmax", "wp_gw", "wp_gw_black", "keep_gray")
+
+
+def _ace_scale(scores, scaling="minmax", center=None):
+    """
+    Dynamic tone reproduction scaling of the ACE scores R_c (in [-1, 1]).
+
+    minmax:      O = s_c (R_c - m_c), [m_c, M_c] -> [0, 255]      (Rizzi 2003)
+    wp_gw:       O = 127.5 + 127.5 R_c / M_c, negatives clipped   (Rizzi 2003,
+                 white patch + grey world: R = 0 is middle grey)
+    wp_gw_black: as wp_gw above R = 0, but the negative side gets its own
+                 slope 127.5 / |m_c| so that m_c reaches 0 and the whole
+                 dynamic is used (Chambah et al. 2003, "WP+GW (black)")
+    keep_gray:   wp_gw_black with the original mean grey level of the image
+                 (``center``, the same for every channel) instead of 127.5 as
+                 the value of R = 0 (Chambah et al. 2003, "keep original
+                 gray"): the key of the picture is preserved while the
+                 common centre still neutralises the cast
+    The piecewise forms are our reading of the textual description in
+    Chambah et al.; the paper gives no formula for them.
+    """
+    if scaling not in ACE_SCALINGS:
+        raise ValueError("scaling must be one of %r" % (ACE_SCALINGS,))
     out = np.empty(scores.shape, dtype=np.uint8)
     for c in range(scores.shape[0]):
-        lo, hi = scores[c].min(), scores[c].max()
-        if hi - lo <= 0:
-            out[c] = 128
+        r = scores[c]
+        lo, hi = r.min(), r.max()
+        if scaling == "minmax":
+            if hi - lo <= 0:
+                out[c] = 128
+            else:
+                out[c] = np.clip(np.rint((r - lo) * (255.0 / (hi - lo))), 0, 255)
+            continue
+        mid = 127.5 if scaling != "keep_gray" else float(center)
+        up = (255.0 - mid) / hi if hi > 0 else 0.0
+        if scaling == "wp_gw":
+            down = up
         else:
-            out[c] = np.clip(np.rint((scores[c] - lo) * (255.0 / (hi - lo))), 0, 255)
+            down = mid / (-lo) if lo < 0 else 0.0
+        mapped = mid + np.where(r >= 0, r * up, r * down)
+        out[c] = np.clip(np.rint(mapped), 0, 255)
     return out
 
 
@@ -392,12 +426,12 @@ def _luminance_plane(planes):
     return 0.299 * f[0] + 0.587 * f[1] + 0.114 * f[2]
 
 
-def _ace_planes(planes, slope, limit, samples, method, levels, seed, workers, min_distance):
-    """Run ACE on a (n, H, W) uint8 stack of planes, return (n, H, W) uint8."""
+def _ace_scores(planes, slope, limit, samples, method, levels, seed, workers, min_distance):
+    """ACE chromatic/spatial adjustment of a (n, H, W) uint8 stack -> (n, H, W) float scores."""
     if method == "fft":
         if levels < 2:
             raise ValueError("levels must be at least 2")
-        return _ace_scale(_ace_fft(planes, float(slope), float(limit), int(levels), workers))
+        return _ace_fft(planes, float(slope), float(limit), int(levels), workers)
     elif method == "sampling":
         if samples <= 0:
             raise ValueError("samples must be positive")
@@ -407,22 +441,32 @@ def _ace_planes(planes, slope, limit, samples, method, levels, seed, workers, mi
             # half the mean spacing between random samples
             min_distance = 0.5 * np.sqrt(planes.shape[1] * planes.shape[2] / float(samples))
         work = np.ascontiguousarray(planes)
-        if work.shape[0] == 3:
+        n, h, w = work.shape
+        if n == 3:
             image = _rgbimage(work)
         else:
             # luminance-only call: hand the same plane to r, g and b; the C
             # code detects the aliasing and processes it once
             plane = work[0].ctypes.data_as(POINTER(c_ubyte))
-            image = RGBImage(work.shape[2], work.shape[1], plane, plane, plane)
-        libcutil.calc_ace(pointer(image), int(samples), float(slope), float(limit),
-                          c_uint(int(seed) & 0xFFFFFFFF), float(min_distance))
-        return work
+            image = RGBImage(w, h, plane, plane, plane)
+        scores = np.zeros((3, h, w), dtype=np.float32)
+        libcutil.calc_ace_scores(pointer(image), int(samples), float(slope), float(limit),
+                                 c_uint(int(seed) & 0xFFFFFFFF), float(min_distance), scores)
+        return scores[:n].astype(np.float64)
     raise ValueError("unknown method %r (expected 'fft' or 'sampling')" % (method,))
+
+
+def _ace_planes(planes, slope, limit, samples, method, levels, seed, workers, min_distance,
+                scaling="minmax"):
+    """Run ACE on a (n, H, W) uint8 stack of planes, return (n, H, W) uint8."""
+    scores = _ace_scores(planes, slope, limit, samples, method, levels, seed, workers, min_distance)
+    return _ace_scale(scores, scaling, float(planes.mean()))
 
 
 def automatic_color_equalization(nimg, slope=10, limit=1000, samples=500,
                                  method="fft", levels=16, seed=None, workers=None,
-                                 min_distance=None, preserve_chroma=False):
+                                 min_distance=None, preserve_chroma=False,
+                                 alpha=None, scaling="minmax"):
     """
     A. Rizzi, C. Gatta and D. Marini, "A new algorithm for unsupervised global
     and local color correction.", Pattern Recognition Letters, vol. 24, no. 11, 2003.
@@ -449,17 +493,30 @@ def automatic_color_equalization(nimg, slope=10, limit=1000, samples=500,
         Useful after a global white balance (e.g. retinex_with_adjust) to add
         ACE's local contrast without the desaturation of the per channel
         stretch.  This is an extension, not part of the paper.
+    alpha: slope of the saturation function on intensities normalised to
+        [0, 1] (the papers' notation; saturation at a difference of 1/alpha).
+        Overrides slope/limit when given: alpha = 255 * slope / limit.
+    scaling: dynamic tone reproduction scaling, one of "minmax" (default,
+        linear stretch), "wp_gw" (R=0 maps to middle grey, white patch +
+        grey world), "wp_gw_black" and "keep_gray" (Chambah et al. 2003, see
+        _ace_scale).
     """
+    if alpha is not None:
+        if alpha <= 0:
+            raise ValueError("alpha must be positive")
+        slope, limit = float(alpha), 255.0
     if slope <= 0 or limit <= 0:
         raise ValueError("slope and limit must be positive")
+    if scaling not in ACE_SCALINGS:
+        raise ValueError("scaling must be one of %r" % (ACE_SCALINGS,))
     planes = _planes(nimg)
     if not preserve_chroma:
-        out = _ace_planes(planes, slope, limit, samples, method, levels, seed, workers, min_distance)
+        out = _ace_planes(planes, slope, limit, samples, method, levels, seed, workers, min_distance, scaling)
         return _to_image(out)
     luma = _luminance_plane(planes)
     luma8 = np.clip(np.rint(luma), 0, 255).astype(np.uint8)[None]
     luma_ace = _ace_planes(np.ascontiguousarray(luma8), slope, limit, samples, method,
-                           levels, seed, workers, min_distance)[0].astype(np.float64)
+                           levels, seed, workers, min_distance, scaling)[0].astype(np.float64)
     ratio = luma_ace / np.maximum(luma, 1.0)
     out = np.clip(np.rint(planes.astype(np.float64) * ratio[None]), 0, 255).astype(np.uint8)
     return _to_image(out)
@@ -952,3 +1009,159 @@ def weighted_grey_edge(nimg, weighting="specular", kappa=10.0, p=1, sigma=2.0, i
                                                iterations=iterations, tolerance=tolerance,
                                                saturation_threshold=saturation_threshold)
     return _apply_gains(nimg, _gains_from_illuminant(e))
+
+
+# ---------------------------------------------------------------------------
+# colour space helpers (sRGB D65 <-> CIELAB)
+# ---------------------------------------------------------------------------
+_RGB2XYZ = np.array([[0.4124564, 0.3575761, 0.1804375],
+                     [0.2126729, 0.7151522, 0.0721750],
+                     [0.0193339, 0.1191920, 0.9503041]])
+_XYZ2RGB = np.linalg.inv(_RGB2XYZ)
+_D65 = np.array([0.95047, 1.0, 1.08883])
+
+
+def _srgb_to_linear(v):
+    v = np.asarray(v, dtype=np.float64) / 255.0
+    return np.where(v <= 0.04045, v / 12.92, ((v + 0.055) / 1.055) ** 2.4)
+
+
+def _linear_to_srgb(v):
+    v = np.clip(v, 0.0, 1.0)
+    s = np.where(v <= 0.0031308, 12.92 * v, 1.055 * np.power(v, 1.0 / 2.4) - 0.055)
+    return s * 255.0
+
+
+def rgb_to_lab(nimg):
+    """sRGB (uint8, D65) -> CIELAB float array of the same shape."""
+    xyz = _srgb_to_linear(nimg) @ _RGB2XYZ.T / _D65
+    f = np.where(xyz > 216.0 / 24389.0, np.cbrt(xyz), (24389.0 / 27.0 * xyz + 16.0) / 116.0)
+    lab = np.empty(xyz.shape)
+    lab[..., 0] = 116.0 * f[..., 1] - 16.0
+    lab[..., 1] = 500.0 * (f[..., 0] - f[..., 1])
+    lab[..., 2] = 200.0 * (f[..., 1] - f[..., 2])
+    return lab
+
+
+def lab_to_rgb(lab):
+    """CIELAB -> sRGB uint8 (values outside the gamut are clipped)."""
+    lab = np.asarray(lab, dtype=np.float64)
+    fy = (lab[..., 0] + 16.0) / 116.0
+    fx = fy + lab[..., 1] / 500.0
+    fz = fy - lab[..., 2] / 200.0
+    f = np.stack([fx, fy, fz], axis=-1)
+    xyz = np.where(f ** 3 > 216.0 / 24389.0, f ** 3, (116.0 * f - 16.0) * 27.0 / 24389.0) * _D65
+    rgb = _linear_to_srgb(xyz @ _XYZ2RGB.T)
+    return np.clip(np.rint(rgb), 0, 255).astype(np.uint8)
+
+
+# ---------------------------------------------------------------------------
+# simple global tools used by the film restoration papers
+# ---------------------------------------------------------------------------
+def simplest_color_balance(nimg, clip=0.01):
+    """
+    N. Limare, J.-L. Lisani, J.-M. Morel, A. B. Petro and C. Sbert, "Simplest
+    Color Balance", Image Processing On Line, 2011.
+
+    Saturate ``clip`` of the pixels at both ends of every channel and stretch
+    the rest linearly to [0, 255] (what image editors call auto levels or
+    white balance by percentile).
+    """
+    if not 0 <= clip < 0.5:
+        raise ValueError("clip must be in [0, 0.5)")
+    nimg = np.asarray(nimg)
+    return _simplest_color_balance(nimg.astype(np.float64), clip)
+
+
+def complementary_cast_removal(nimg, k):
+    """
+    O.-M. Machidon and M. Ivanovici, "Digital color restoration for the
+    preservation of reversal film heritage", Journal of Cultural Heritage 33,
+    2018, eq. (1):  g = f + k * complement(mean(f)),  complement(c) = 255 - c.
+
+    The complementary of the average colour is added to every pixel with
+    weight k in [0, 1).  The paper picks k per film stock by minimising the
+    distance of a colour chart slide to its reference colours (k = 0.28 and
+    0.36 for its two stocks); without a chart k has to be chosen by eye.
+    Note that the mapping also brightens the image (the paper follows it
+    with a colour correction / contrast step).
+    """
+    f = np.asarray(nimg).astype(np.float64)
+    if f.ndim != 3 or f.shape[2] != 3:
+        raise ValueError("expected an (height, width, 3) RGB array")
+    mean = f.reshape(-1, 3).mean(axis=0)
+    comp = 255.0 - mean
+    if not 0 <= k < 1:
+        raise ValueError("k must be in [0, 1)")
+    return np.clip(np.rint(f + k * comp), 0, 255).astype(np.uint8)
+
+
+def color_chart_transform(acquired, reference):
+    """
+    Least squares 3x3 colour transform T with reference = T @ acquired for
+    matching sets of colours (rows of RGB), as used by Machidon & Ivanovici
+    2018, eq. (4), to correct every slide of a film stock with the colours of
+    its colour chart slide.  Returns T (3, 3).
+    """
+    a = np.asarray(acquired, dtype=np.float64).reshape(-1, 3)
+    r = np.asarray(reference, dtype=np.float64).reshape(-1, 3)
+    if a.shape != r.shape or len(a) < 3:
+        raise ValueError("need at least three matching colours")
+    t, _, _, _ = np.linalg.lstsq(a, r, rcond=None)
+    return t.T
+
+
+def apply_color_transform(nimg, transform):
+    """Apply a 3x3 linear colour transform (see color_chart_transform) to an image."""
+    f = np.asarray(nimg).astype(np.float64)
+    out = f.reshape(-1, 3) @ np.asarray(transform, dtype=np.float64).T
+    return np.clip(np.rint(out), 0, 255).astype(np.uint8).reshape(f.shape)
+
+
+def saturation_enhancement(nimg, factor=1.5):
+    """
+    Non-uniform saturation enhancement in the spirit of Chambah, Besserer and
+    Courtellemont (2002) as summarised by Chambah et al. 2003: the cloud of
+    (a*, b*) chroma values is stretched about its own centre along its
+    principal axes, so the real colours of a faded image are revived without
+    increasing the colour cast (the mean chroma is unchanged).  The 2003
+    paper gives no rule for the amount of stretch; ``factor`` (scalar or one
+    value per principal axis) is applied to the semi-axes.
+    """
+    lab = rgb_to_lab(np.asarray(nimg))
+    ab = lab[..., 1:].reshape(-1, 2)
+    center = ab.mean(axis=0)
+    centered = ab - center
+    cov = centered.T @ centered / max(len(ab) - 1, 1)
+    _, vecs = np.linalg.eigh(cov)
+    factors = np.broadcast_to(np.asarray(factor, dtype=np.float64), (2,))
+    if np.any(factors <= 0):
+        raise ValueError("factor must be positive")
+    stretched = (centered @ vecs) * factors @ vecs.T + center
+    lab[..., 1:] = stretched.reshape(lab.shape[:2] + (2,))
+    return lab_to_rgb(lab)
+
+
+def film_restoration_ace(nimg, saturation=0.2, scaling="keep_gray", enhance_saturation=None,
+                         **ace_kwargs):
+    """
+    M. Chambah, A. Rizzi, C. Gatta, B. Besserer and D. Marini, "Perceptual
+    approach for unsupervised digital color restoration of cinematographic
+    archives", SPIE Electronic Imaging 5008, 2003.
+
+    ACE tuned for faded film: a saturation shape function saturating at a
+    normalised difference of ``saturation`` (0.2 in the paper; smaller values
+    add noise), the "WP+GW (black)" scaling with "keep original gray" (the
+    channels are centred on the original mean grey level instead of middle
+    grey, preserving the key of the picture) and,
+    optionally, the non-uniform saturation enhancement of the colours before
+    ACE (``enhance_saturation`` = stretch factor, see saturation_enhancement;
+    the paper's own rule for the amount is not given).  Remaining keyword
+    arguments go to automatic_color_equalization (method, samples, seed, ...).
+    """
+    if saturation <= 0:
+        raise ValueError("saturation must be positive")
+    img = np.asarray(nimg)
+    if enhance_saturation is not None:
+        img = saturation_enhancement(img, enhance_saturation)
+    return automatic_color_equalization(img, alpha=1.0 / saturation, scaling=scaling, **ace_kwargs)
