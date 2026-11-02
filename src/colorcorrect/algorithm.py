@@ -146,10 +146,15 @@ def _quadratic_fit(channel, ref_sum, ref_max):
     s1, s2 = x.sum(), np.square(x).sum()
     m1 = x.max()
     a = np.array([[s2, s1], [m1 * m1, m1]])
-    if m1 <= 0 or abs(np.linalg.det(a)) < 1e-12:
-        # flat (or black) channel: the system is singular, fall back to a gain
+    # a flat (or black) channel makes the rows collinear; test the determinant
+    # relative to the row norms so the check does not depend on image size
+    scale = np.linalg.norm(a[0]) * np.linalg.norm(a[1])
+    if m1 <= 0 or scale <= 0 or abs(np.linalg.det(a)) <= 1e-9 * scale:
         return 0.0, _safe_ratio(ref_max, m1)
-    mu, nu = np.linalg.solve(a, np.array([ref_sum, ref_max]))
+    try:
+        mu, nu = np.linalg.solve(a, np.array([ref_sum, ref_max]))
+    except np.linalg.LinAlgError:
+        return 0.0, _safe_ratio(ref_max, m1)
     return mu, nu
 
 
