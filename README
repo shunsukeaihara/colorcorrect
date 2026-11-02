@@ -11,20 +11,23 @@ description::
 
 require::
 
-    python3.6 or later
-    numpy
-    Pillow
+    python3.10 or later
+    numpy>=2.0
+    Pillow>=10.0
     a C++ compiler (the block based algorithms and the sampled ACE are in C++)
 
 install::
 
-    % python setup.py build
-    % python setup.py install
+    % pip install .
+
+    (a C++ compiler is needed; "python -m build" creates sdist and wheel)
 
 test::
 
-    % python setup.py build_ext --inplace
-    % PYTHONPATH=src python -m unittest discover -s test -p "*_test.py"
+    % pip install -e .
+    % python -m unittest discover -s test -p "*_test.py"
+
+    or simply "tox".
 
 impement algorithms::
 
@@ -41,7 +44,7 @@ impement algorithms::
         colorcorrect.algorithm.retinex
         usage: image
     retinex with adjust (gray world + retinex quadratic mapping)
-            colorcorrect.algorithm.retinex_adjust
+            colorcorrect.algorithm.retinex_with_adjust
             usage: image
     standard deviation weighted grey world
              colorcorrect.algorithm.standard_deviation_weighted_grey_world

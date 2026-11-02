@@ -153,14 +153,15 @@ def _quadratic_fit(channel, ref_sum, ref_max):
     return mu, nu
 
 
-def retinex_adjust(nimg):
+def retinex_with_adjust(nimg):
     """
     from 'Combining Gray World and Retinex Theory for Automatic White Balance
     in Digital Photography' (E. Lam, 2005)
 
     R and B are mapped through a quadratic x -> mu*x^2 + nu*x whose
     coefficients make them satisfy both the grey world (mean) and the retinex
-    (max) assumption with respect to G.
+    (max) assumption with respect to G.  The mapping already enforces the
+    retinex constraint, so no separate retinex pass is run first.
     """
     nimg = np.asarray(nimg)
     out = nimg.astype(np.float64)
@@ -171,7 +172,6 @@ def retinex_adjust(nimg):
         x = out[..., c]
         out[..., c] = mu * x * x + nu * x
     return np.clip(np.rint(out), 0, 255).astype(np.uint8)
-
 
 
 # ---------------------------------------------------------------------------

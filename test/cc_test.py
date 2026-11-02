@@ -16,7 +16,7 @@ ALL_ALGORITHMS = [
     cca.grey_world,
     cca.retinex,
     cca.max_white,
-    cca.retinex_adjust,
+    cca.retinex_with_adjust,
     cca.standard_deviation_weighted_grey_world,
     cca.standard_deviation_weighted_grey_world_python,
     cca.standard_deviation_and_luminance_weighted_gray_world,
@@ -101,22 +101,22 @@ class CCTestCase(TestCase):
         self.assertEqual(mx[0], mx[1])
         self.assertEqual(mx[2], mx[1])
 
-    def test_retinex_adjust_satisfies_both_constraints(self):
+    def test_retinex_with_adjust_satisfies_both_constraints(self):
         img = cast_image(self.rng, gains=(1.2, 1.0, 0.8))
-        out = cca.retinex_adjust(img).reshape(-1, 3).astype(np.float64)
+        out = cca.retinex_with_adjust(img).reshape(-1, 3).astype(np.float64)
         # quadratic mapping fulfils grey world (mean) and retinex (max) w.r.t. G
         self.assertLess(abs(out[:, 0].mean() - out[:, 1].mean()), 1.0)
         self.assertLess(abs(out[:, 2].mean() - out[:, 1].mean()), 1.0)
         self.assertLessEqual(abs(out[:, 0].max() - out[:, 1].max()), 1)
         self.assertLessEqual(abs(out[:, 2].max() - out[:, 1].max()), 1)
 
-    def test_retinex_adjust_never_wraps_around(self):
+    def test_retinex_with_adjust_never_wraps_around(self):
         # a channel whose quadratic fit overshoots 255 must be clipped, not
         # wrapped (the old code clipped the coefficients instead of the result)
         img = self.rng.integers(0, 256, (40, 50, 3), dtype=np.uint8)
         img[..., 2] = (img[..., 2] // 4).astype(np.uint8)
         img[0, 0, 2] = 255
-        out = cca.retinex_adjust(img)
+        out = cca.retinex_with_adjust(img)
         self.assertEqual(out.dtype, np.uint8)
         f = img.astype(np.float64)
         mu, nu = cca._quadratic_fit(f[..., 2], f[..., 1].sum(), f[..., 1].max())
