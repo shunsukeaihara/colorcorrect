@@ -27,6 +27,18 @@ test::
     % pip install -e .
     % python -m unittest discover -s test -p "*_test.py"
 
+browser demo::
+
+    docs/index.html runs every algorithm in the browser with Pyodide (CPython
+    and numpy compiled to WebAssembly).  The "Demo page" workflow builds the
+    package for Pyodide with cibuildwheel (so the C++ extension is available
+    as WebAssembly too) and publishes the page with GitHub Pages; without the
+    wheel the page falls back to the pure Python sources, in which case the
+    block based grey world functions run in numpy and sampling ACE, random
+    spray retinex and RACE are unavailable.  Nothing is uploaded; images stay
+    in the browser.  colorcorrect.algorithm.has_extension() tells whether the
+    compiled extension was loaded.
+
 impement algorithms::
 
     gray world
