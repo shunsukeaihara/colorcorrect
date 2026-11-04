@@ -476,3 +476,36 @@ class FilmRestorationTestCase(TestCase):
         self.assertTrue((out.min(axis=0) == 0).all())
         with self.assertRaises(ValueError):
             cca.simplest_color_balance(self.img, clip=0.5)
+
+
+class WithoutExtensionTestCase(TestCase):
+    """The pure numpy code paths used when the C++ extension is unavailable (e.g. Pyodide)."""
+
+    def setUp(self):
+        self.img = from_pil(Image.open(TEST_IMAGE))
+        self.saved = cca.libcutil
+        cca.libcutil = cca._MissingExtension(OSError("simulated"))
+
+    def tearDown(self):
+        cca.libcutil = self.saved
+
+    def test_block_grey_world_falls_back_to_numpy(self):
+        self.assertFalse(cca.has_extension())
+        for func, twin in ((cca.standard_deviation_weighted_grey_world,
+                            cca.standard_deviation_weighted_grey_world_python),
+                           (cca.standard_deviation_and_luminance_weighted_gray_world,
+                            cca.standard_deviation_and_luminance_weighted_gray_world_python),
+                           (cca.luminance_weighted_gray_world, cca.luminance_weighted_gray_world_python)):
+            self.assertTrue(np.array_equal(func(self.img, 20, 20), twin(self.img, 20, 20)))
+
+    def test_extension_only_functions_explain(self):
+        small = self.img[:40, :50]
+        for call in (lambda: cca.automatic_color_equalization(small, method="sampling"),
+                     lambda: cca.random_spray_retinex(small),
+                     lambda: cca.race(small)):
+            with self.assertRaises(RuntimeError) as ctx:
+                call()
+            self.assertIn("_cutil", str(ctx.exception))
+        # the numpy implementations keep working
+        self.assertEqual(cca.automatic_color_equalization(small).shape, small.shape)
+        self.assertEqual(cca.film_restoration_ace(small).shape, small.shape)

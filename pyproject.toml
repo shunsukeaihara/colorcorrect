@@ -41,3 +41,10 @@ test-command = "python -m unittest discover -s test -p \"*_test.py\""
 
 [tool.cibuildwheel.macos]
 archs = ["universal2"]
+
+[tool.cibuildwheel.pyodide]
+# WebAssembly build for the browser demo (docs/); must match PYODIDE_VERSION in docs/index.html
+pyodide-version = "0.27.7"
+build = "cp312-*"
+test-sources = []
+test-command = "python -c \"import colorcorrect.algorithm as a; assert a.has_extension(); import numpy as np; a.race(np.zeros((8, 8, 3), np.uint8), sprays=1, points=4, seed=0)\""

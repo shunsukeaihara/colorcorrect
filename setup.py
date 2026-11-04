@@ -11,6 +11,14 @@ from setuptools.command.build_ext import build_ext
 EXPORTED = ["calc_sdwgw", "calc_sdlwgw", "calc_lwgw", "calc_ace", "calc_ace_scores", "calc_rsr", "calc_race", "delete_doubleptr"]
 
 import sys
+import sysconfig
+
+
+def _target_is_emscripten():
+    """True when cross compiling for Pyodide (the host python is still linux)."""
+    platform = os.environ.get('_PYTHON_HOST_PLATFORM', '') or sysconfig.get_platform()
+    return 'emscripten' in platform or 'wasm' in platform or sys.platform == 'emscripten'
+
 
 libs = []
 compile_args = []
@@ -18,7 +26,9 @@ link_args = []
 if os.name == 'posix':
     libs.append('m')
     compile_args = ['-O3', '-std=c++11']
-    if not sys.platform.startswith('darwin'):
+    if not sys.platform.startswith('darwin') and not _target_is_emscripten():
+        # std::thread needs -pthread on Linux; Pyodide (emscripten) has no
+        # threads and must not be linked with it
         compile_args.append('-pthread')
         link_args.append('-pthread')
 

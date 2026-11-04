@@ -7,6 +7,7 @@ Every function takes an ``(height, width, 3)`` RGB ``numpy.uint8`` array (see
 dtype.  The input array is never modified.
 """
 import os
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from ctypes import POINTER
 from ctypes import pointer
@@ -21,7 +22,52 @@ import numpy as np
 
 cutilfolder = os.path.abspath(__file__).rsplit(os.path.sep, 1)[0]
 cutilname = "_cutil"
-libcutil = np.ctypeslib.load_library(cutilname, cutilfolder)
+
+
+class _MissingExtension(object):
+    """
+    Stand-in for the C++ helper library when it could not be loaded (for
+    example in a pure Python checkout or a platform without the compiled
+    extension).  Any call explains what is missing instead of failing with an
+    AttributeError.
+    """
+
+    def __init__(self, error):
+        self.error = error
+
+    def __getattr__(self, name):
+        raise RuntimeError("the colorcorrect C++ extension (_cutil) is not available: %s. "
+                           "The block based grey world functions fall back to numpy; "
+                           "method='sampling' ACE, random_spray_retinex and race need "
+                           "the extension." % (self.error,))
+
+    def __bool__(self):
+        return False
+
+
+try:
+    libcutil = np.ctypeslib.load_library(cutilname, cutilfolder)
+except OSError as _error:  # pragma: no cover - depends on the installation
+    libcutil = _MissingExtension(_error)
+
+
+def has_extension():
+    """True when the compiled C++ helper library is available."""
+    return bool(libcutil)
+
+
+def _spray_workers(workers):
+    """Thread count handed to the C++ spray code: 0 = all cores, 1 where threads do not exist."""
+    if sys.platform in ("emscripten", "wasi"):
+        return 1
+    return int(workers) if workers else 0
+
+
+def _default_workers():
+    """Threads for the numpy FFT code paths (1 where threads are unavailable, e.g. Pyodide)."""
+    if sys.platform == "emscripten" or sys.platform == "wasi":
+        return 1
+    return min(8, os.cpu_count() or 1)
 
 
 class RGBImage(Structure):
@@ -34,19 +80,20 @@ class RGBImage(Structure):
     ]
 
 
-libcutil.calc_sdwgw.argtypes = [POINTER(RGBImage), c_int, c_int]
-libcutil.calc_sdwgw.restype = c_void_p
-libcutil.calc_sdlwgw.argtypes = [POINTER(RGBImage), c_int, c_int]
-libcutil.calc_sdlwgw.restype = c_void_p
-libcutil.calc_lwgw.argtypes = [POINTER(RGBImage), c_int, c_int]
-libcutil.calc_lwgw.restype = c_void_p
-libcutil.delete_doubleptr.argtypes = [c_void_p]
-libcutil.calc_ace.argtypes = [POINTER(RGBImage), c_int, c_double, c_double, c_uint, c_double]
-libcutil.calc_ace_scores.argtypes = [POINTER(RGBImage), c_int, c_double, c_double, c_uint, c_double,
-                                     np.ctypeslib.ndpointer(dtype=np.float32, flags="C_CONTIGUOUS")]
-libcutil.calc_rsr.argtypes = [POINTER(RGBImage), POINTER(RGBImage), c_int, c_int, c_double, c_uint, c_int]
-libcutil.calc_race.argtypes = [POINTER(RGBImage), POINTER(RGBImage), c_int, c_int, c_double, c_double,
-                               c_int, c_uint, c_int]
+if libcutil:
+    libcutil.calc_sdwgw.argtypes = [POINTER(RGBImage), c_int, c_int]
+    libcutil.calc_sdwgw.restype = c_void_p
+    libcutil.calc_sdlwgw.argtypes = [POINTER(RGBImage), c_int, c_int]
+    libcutil.calc_sdlwgw.restype = c_void_p
+    libcutil.calc_lwgw.argtypes = [POINTER(RGBImage), c_int, c_int]
+    libcutil.calc_lwgw.restype = c_void_p
+    libcutil.delete_doubleptr.argtypes = [c_void_p]
+    libcutil.calc_ace.argtypes = [POINTER(RGBImage), c_int, c_double, c_double, c_uint, c_double]
+    libcutil.calc_ace_scores.argtypes = [POINTER(RGBImage), c_int, c_double, c_double, c_uint, c_double,
+                                         np.ctypeslib.ndpointer(dtype=np.float32, flags="C_CONTIGUOUS")]
+    libcutil.calc_rsr.argtypes = [POINTER(RGBImage), POINTER(RGBImage), c_int, c_int, c_double, c_uint, c_int]
+    libcutil.calc_race.argtypes = [POINTER(RGBImage), POINTER(RGBImage), c_int, c_int, c_double, c_double,
+                                   c_int, c_uint, c_int]
 
 
 # ---------------------------------------------------------------------------
@@ -267,7 +314,10 @@ def standard_deviation_weighted_grey_world(nimg, subwidth=20, subheight=20):
     AUTOMATIC WHITE BALANCING USING LUMINANCE COMPONENT AND STANDARD DEVIATION OF RGB COMPONENTS
     http://www.ece.umassd.edu/faculty/acosta/icassp/icassp_2004/pdfs/0300493.pdf
     """
-    gains = _c_gains(libcutil.calc_sdwgw, nimg, subwidth, subheight)
+    if not libcutil:
+        gains = _block_gains(nimg, subwidth, subheight, luminance_weighted=False, std_weighted=True)
+    else:
+        gains = _c_gains(libcutil.calc_sdwgw, nimg, subwidth, subheight)
     return _apply_gains(nimg, gains)
 
 
@@ -276,7 +326,10 @@ def standard_deviation_and_luminance_weighted_gray_world(nimg, subwidth=20, subh
     AUTOMATIC WHITE BALANCING USING LUMINANCE COMPONENT AND STANDARD DEVIATION OF RGB COMPONENTS
     http://www.ece.umassd.edu/faculty/acosta/icassp/icassp_2004/pdfs/0300493.pdf
     """
-    gains = _c_gains(libcutil.calc_sdlwgw, nimg, subwidth, subheight)
+    if not libcutil:
+        gains = _block_gains(nimg, subwidth, subheight, luminance_weighted=True, std_weighted=True)
+    else:
+        gains = _c_gains(libcutil.calc_sdlwgw, nimg, subwidth, subheight)
     return _apply_gains(nimg, gains)
 
 
@@ -285,7 +338,10 @@ def luminance_weighted_gray_world(nimg, subwidth=20, subheight=20):
     AUTOMATIC WHITE BALANCING USING LUMINANCE COMPONENT AND STANDARD DEVIATION OF RGB COMPONENTS
     http://www.ece.umassd.edu/faculty/acosta/icassp/icassp_2004/pdfs/0300493.pdf
     """
-    gains = _c_gains(libcutil.calc_lwgw, nimg, subwidth, subheight)
+    if not libcutil:
+        gains = _block_gains(nimg, subwidth, subheight, luminance_weighted=True, std_weighted=False)
+    else:
+        gains = _c_gains(libcutil.calc_lwgw, nimg, subwidth, subheight)
     return _apply_gains(nimg, gains)
 
 
@@ -356,7 +412,7 @@ def _ace_fft(planes, slope, limit, levels, workers=None):
         return wk * convolve(sat)
 
     if workers is None:
-        workers = min(8, os.cpu_count() or 1)
+        workers = _default_workers()
     channels = [plane.astype(np.int64) for plane in planes]
     jobs = [(channels[c], k, c) for c in range(len(channels)) for k in range(levels)]
     scores = np.zeros((len(channels), h, w))
@@ -761,8 +817,12 @@ def multi_scale_retinex(nimg, sigmas=(15, 80, 250), color_restoration=True,
         return np.log(_gaussian_blur_fft(f[..., c], sigma) + 1.0)
 
     # numpy's FFT releases the GIL, so the blurs run in parallel
-    with ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 1)) as pool:
-        results = list(pool.map(blurred_log, jobs))
+    workers = _default_workers()
+    if workers > 1:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            results = list(pool.map(blurred_log, jobs))
+    else:
+        results = [blurred_log(job) for job in jobs]
     msr = np.zeros_like(f)
     for (c, _), blurred in zip(jobs, results):
         msr[..., c] += log_f[..., c] - blurred
@@ -796,7 +856,7 @@ def random_spray_retinex(nimg, sprays=10, points=250, radius=None, seed=None, wo
         seed = int(np.random.randint(0, 2 ** 32, dtype=np.uint64))
     libcutil.calc_rsr(pointer(_rgbimage(planes)), pointer(_rgbimage(out)), int(sprays), int(points),
                       float(radius) if radius else 0.0, c_uint(int(seed) & 0xFFFFFFFF),
-                      int(workers) if workers else 0)
+                      _spray_workers(workers))
     return _to_image(out)
 
 
@@ -832,7 +892,7 @@ def race(nimg, sprays=10, points=250, alpha=20.0, regularize=True, radius=None,
         seed = int(np.random.randint(0, 2 ** 32, dtype=np.uint64))
     libcutil.calc_race(pointer(_rgbimage(planes)), pointer(_rgbimage(out)), int(sprays), int(points),
                        float(radius) if radius else 0.0, float(alpha), 1 if regularize else 0,
-                       c_uint(int(seed) & 0xFFFFFFFF), int(workers) if workers else 0)
+                       c_uint(int(seed) & 0xFFFFFFFF), _spray_workers(workers))
     return _to_image(out)
 
 
