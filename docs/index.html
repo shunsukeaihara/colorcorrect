@@ -1,0 +1,365 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>colorcorrect demo</title>
+<meta name="description" content="Run the colorcorrect colour constancy and enhancement algorithms in your browser (Pyodide + numpy + the C++ extension compiled to WebAssembly).">
+<style>
+  :root {
+    --bg: #f6f6f4; --fg: #1d1d1b; --muted: #6b6b66; --line: #d9d9d3; --accent: #2b6cb0;
+    --panel: #ffffff; --ok: #2f855a; --warn: #b7791f; --err: #c53030;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #161614; --fg: #ecece8; --muted: #a3a39c; --line: #3a3a36; --accent: #63b3ed;
+      --panel: #1f1f1c; --ok: #68d391; --warn: #f6ad55; --err: #fc8181;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #161614; --fg: #ecece8; --muted: #a3a39c; --line: #3a3a36; --accent: #63b3ed;
+    --panel: #1f1f1c; --ok: #68d391; --warn: #f6ad55; --err: #fc8181;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 1200px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 1.4rem; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 12px; }
+  .status { font-size: 0.9rem; padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); margin-bottom: 12px; }
+  .status.ok { border-color: var(--ok); } .status.warn { border-color: var(--warn); } .status.err { border-color: var(--err); }
+  .grid { display: grid; grid-template-columns: 300px 1fr; gap: 16px; }
+  @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+  .drop { border: 2px dashed var(--line); border-radius: 10px; padding: 18px 12px; text-align: center; color: var(--muted); cursor: pointer; }
+  .drop.over { border-color: var(--accent); color: var(--accent); }
+  label { display: block; font-size: 0.85rem; color: var(--muted); margin-top: 10px; }
+  select, input[type=number], input[type=text] { width: 100%; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); font: inherit; }
+  input[type=checkbox] { margin-right: 6px; }
+  .row { display: flex; gap: 8px; align-items: center; margin-top: 12px; flex-wrap: wrap; }
+  button { padding: 8px 14px; border: 1px solid var(--accent); border-radius: 8px; background: var(--accent); color: #fff; font: inherit; cursor: pointer; }
+  button.secondary { background: transparent; color: var(--accent); }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .images { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 760px) { .images { grid-template-columns: 1fr; } }
+  figure { margin: 0; }
+  figcaption { font-size: 0.85rem; color: var(--muted); margin-bottom: 4px; }
+  canvas { width: 100%; height: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); display: block; }
+  .doc { font-size: 0.85rem; color: var(--muted); white-space: pre-wrap; margin-top: 8px; max-height: 11em; overflow: auto; }
+  .time { font-variant-numeric: tabular-nums; }
+  code { font-size: 0.9em; }
+</style>
+</head>
+<body>
+<main>
+  <h1>colorcorrect in the browser</h1>
+  <p class="sub">Drop an image, pick an algorithm, run. Everything runs locally with Pyodide (CPython + numpy compiled to WebAssembly); nothing is uploaded.</p>
+  <div id="status" class="status">Loading Pyodide…</div>
+
+  <div class="grid">
+    <section class="panel">
+      <div id="drop" class="drop">Drop an image here or click to choose<input id="file" type="file" accept="image/*" hidden></div>
+      <label>Max size (long edge, px)
+        <select id="maxsize">
+          <option value="512">512</option>
+          <option value="800" selected>800</option>
+          <option value="1200">1200</option>
+          <option value="0">original</option>
+        </select>
+      </label>
+      <label>Algorithm <select id="algo"></select></label>
+      <div id="params"></div>
+      <div class="row">
+        <button id="run" disabled>Run</button>
+        <button id="download" class="secondary" disabled>Download result</button>
+        <span id="time" class="time"></span>
+      </div>
+      <div id="doc" class="doc"></div>
+    </section>
+
+    <section class="images">
+      <figure><figcaption>Original <span id="dims"></span></figcaption><canvas id="src" width="4" height="3"></canvas></figure>
+      <figure><figcaption>Result</figcaption><canvas id="dst" width="4" height="3"></canvas></figure>
+    </section>
+  </div>
+</main>
+
+<script>
+// ----------------------------------------------------------------------------
+// configuration
+// ----------------------------------------------------------------------------
+const PYODIDE_VERSION = "0.27.7";
+const params = new URLSearchParams(location.search);
+// ?pyodide=./pyodide/ serves Pyodide from a local copy (used for offline tests)
+const PYODIDE_INDEX = params.get("pyodide") || `https://cdn.jsdelivr.net/pyodide/v${PYODIDE_VERSION}/full/`;
+
+// Algorithm registry: python function name -> parameters.
+// kind: number | select | bool.  Parameters are passed as keyword arguments.
+const NEEDS_EXT = "needs the C++ extension (WebAssembly build)";
+const ALGORITHMS = [
+  { group: "Global white balance", items: [
+    { fn: "grey_world", label: "Grey world" },
+    { fn: "max_white", label: "Max white (white patch)" },
+    { fn: "stretch", label: "Stretch" },
+    { fn: "retinex", label: "Retinex (max to G)" },
+    { fn: "retinex_with_adjust", label: "Retinex with adjust (Lam 2005)" },
+    { fn: "shades_of_gray", label: "Shades of Gray", params: [
+      { name: "p", kind: "number", value: 6, min: 1, max: 50, step: 1 } ] },
+    { fn: "grey_edge", label: "Grey Edge", params: [
+      { name: "order", kind: "select", value: "1", options: ["0", "1", "2"], int: true },
+      { name: "p", kind: "number", value: 6, min: 1, max: 50, step: 1 },
+      { name: "sigma", kind: "number", value: 2, min: 0.5, max: 10, step: 0.5 } ] },
+    { fn: "weighted_grey_edge", label: "Weighted Grey Edge", params: [
+      { name: "weighting", kind: "select", value: "specular", options: ["specular", "shadow", "material"] },
+      { name: "kappa", kind: "number", value: 10, min: 1, max: 50, step: 1 },
+      { name: "p", kind: "number", value: 1, min: 1, max: 20, step: 1 },
+      { name: "sigma", kind: "number", value: 2, min: 0.5, max: 10, step: 0.5 },
+      { name: "iterations", kind: "number", value: 10, min: 1, max: 20, step: 1 } ] },
+    { fn: "pca_color_constancy", label: "PCA (Cheng 2014)", params: [
+      { name: "fraction", kind: "number", value: 0.035, min: 0.005, max: 0.5, step: 0.005 } ] },
+    { fn: "gray_pixel", label: "Gray pixel / grayness index", params: [
+      { name: "fraction", kind: "number", value: 0.001, min: 0.0001, max: 0.1, step: 0.0005 } ] },
+    { fn: "complementary_cast_removal", label: "Complementary cast removal (Machidon 2018)", params: [
+      { name: "k", kind: "number", value: 0.3, min: 0, max: 0.99, step: 0.01 } ] },
+    { fn: "simplest_color_balance", label: "Simplest color balance", params: [
+      { name: "clip", kind: "number", value: 0.01, min: 0, max: 0.2, step: 0.005 } ] },
+  ]},
+  { group: "Block based grey world (Lam 2004)", items: [
+    { fn: "standard_deviation_weighted_grey_world", label: "SD weighted grey world", params: [
+      { name: "subwidth", kind: "number", value: 20, min: 2, max: 200, step: 1 },
+      { name: "subheight", kind: "number", value: 20, min: 2, max: 200, step: 1 } ] },
+    { fn: "standard_deviation_and_luminance_weighted_gray_world", label: "SD + luminance weighted", params: [
+      { name: "subwidth", kind: "number", value: 20, min: 2, max: 200, step: 1 },
+      { name: "subheight", kind: "number", value: 20, min: 2, max: 200, step: 1 } ] },
+    { fn: "luminance_weighted_gray_world", label: "Luminance weighted", params: [
+      { name: "subwidth", kind: "number", value: 20, min: 2, max: 200, step: 1 },
+      { name: "subheight", kind: "number", value: 20, min: 2, max: 200, step: 1 } ] },
+  ]},
+  { group: "Local / Retinex", items: [
+    { fn: "automatic_color_equalization", label: "ACE (Rizzi 2003)", params: [
+      { name: "method", kind: "select", value: "fft", options: ["fft", "sampling"] },
+      { name: "alpha", kind: "number", value: 2.55, min: 0.5, max: 20, step: 0.05 },
+      { name: "scaling", kind: "select", value: "minmax", options: ["minmax", "wp_gw", "wp_gw_black", "keep_gray"] },
+      { name: "levels", kind: "number", value: 16, min: 4, max: 64, step: 1 },
+      { name: "samples", kind: "number", value: 500, min: 50, max: 5000, step: 50 },
+      { name: "preserve_chroma", kind: "bool", value: false },
+      { name: "seed", kind: "number", value: 0, min: 0, max: 100000, step: 1 } ] },
+    { fn: "film_restoration_ace", label: "Film restoration ACE (Chambah 2003)", params: [
+      { name: "saturation", kind: "number", value: 0.2, min: 0.02, max: 1, step: 0.01 },
+      { name: "scaling", kind: "select", value: "keep_gray", options: ["keep_gray", "wp_gw_black", "wp_gw", "minmax"] },
+      { name: "enhance_saturation", kind: "number", value: 0, min: 0, max: 3, step: 0.1, zeroIsNone: true },
+      { name: "levels", kind: "number", value: 16, min: 4, max: 64, step: 1 } ] },
+    { fn: "multi_scale_retinex", label: "Multi scale retinex (MSR / MSRCR)", params: [
+      { name: "color_restoration", kind: "bool", value: true },
+      { name: "clip", kind: "number", value: 0.01, min: 0, max: 0.2, step: 0.005 } ] },
+    { fn: "random_spray_retinex", label: "Random spray retinex", ext: true, params: [
+      { name: "sprays", kind: "number", value: 5, min: 1, max: 50, step: 1 },
+      { name: "points", kind: "number", value: 100, min: 10, max: 1000, step: 10 },
+      { name: "seed", kind: "number", value: 0, min: 0, max: 100000, step: 1 } ] },
+    { fn: "race", label: "RACE / sigma-RACE", ext: true, params: [
+      { name: "sprays", kind: "number", value: 5, min: 1, max: 50, step: 1 },
+      { name: "points", kind: "number", value: 100, min: 10, max: 1000, step: 10 },
+      { name: "alpha", kind: "number", value: 20, min: 1, max: 100, step: 1 },
+      { name: "regularize", kind: "bool", value: true },
+      { name: "seed", kind: "number", value: 0, min: 0, max: 100000, step: 1 } ] },
+    { fn: "saturation_enhancement", label: "Saturation enhancement (CIELAB)", params: [
+      { name: "factor", kind: "number", value: 1.5, min: 0.2, max: 4, step: 0.1 } ] },
+  ]},
+];
+
+// ----------------------------------------------------------------------------
+// UI
+// ----------------------------------------------------------------------------
+const $ = (id) => document.getElementById(id);
+const statusEl = $("status");
+let pyodide = null, hasExtension = false, imageData = null, resultData = null;
+
+function setStatus(text, cls) { statusEl.textContent = text; statusEl.className = "status" + (cls ? " " + cls : ""); }
+
+function byFn(fn) { for (const g of ALGORITHMS) for (const a of g.items) if (a.fn === fn) return a; return null; }
+
+function buildAlgoSelect() {
+  const sel = $("algo");
+  for (const g of ALGORITHMS) {
+    const og = document.createElement("optgroup"); og.label = g.group;
+    for (const a of g.items) {
+      const o = document.createElement("option"); o.value = a.fn; o.textContent = a.label;
+      if (a.ext && !hasExtension) { o.disabled = true; o.textContent += " (" + NEEDS_EXT + ")"; }
+      og.appendChild(o);
+    }
+    sel.appendChild(og);
+  }
+  sel.value = "film_restoration_ace";
+  sel.addEventListener("change", renderParams);
+  renderParams();
+}
+
+function renderParams() {
+  const algo = byFn($("algo").value);
+  const box = $("params"); box.innerHTML = "";
+  for (const p of algo.params || []) {
+    const label = document.createElement("label");
+    if (p.kind === "bool") {
+      const input = document.createElement("input"); input.type = "checkbox"; input.checked = p.value; input.dataset.name = p.name;
+      label.appendChild(input); label.appendChild(document.createTextNode(p.name));
+    } else if (p.kind === "select") {
+      label.textContent = p.name;
+      const sel = document.createElement("select"); sel.dataset.name = p.name;
+      for (const o of p.options) { const e = document.createElement("option"); e.value = o; e.textContent = o; sel.appendChild(e); }
+      sel.value = p.value; label.appendChild(sel);
+    } else {
+      label.textContent = p.name + (p.zeroIsNone ? " (0 = off)" : "");
+      const input = document.createElement("input"); input.type = "number"; input.dataset.name = p.name;
+      input.value = p.value; input.min = p.min; input.max = p.max; input.step = p.step; label.appendChild(input);
+    }
+    box.appendChild(label);
+  }
+  showDoc(algo.fn);
+}
+
+function collectKwargs() {
+  const algo = byFn($("algo").value); const kwargs = {};
+  for (const p of algo.params || []) {
+    const el = $("params").querySelector(`[data-name="${p.name}"]`);
+    if (p.kind === "bool") kwargs[p.name] = el.checked;
+    else if (p.kind === "select") kwargs[p.name] = p.int ? parseInt(el.value, 10) : el.value;
+    else {
+      const v = parseFloat(el.value);
+      if (p.zeroIsNone && v === 0) kwargs[p.name] = null; else kwargs[p.name] = v;
+    }
+  }
+  return kwargs;
+}
+
+async function showDoc(fn) {
+  if (!pyodide) return;
+  try {
+    const doc = await pyodide.runPythonAsync(`import inspect, colorcorrect.algorithm as cca\ninspect.getdoc(cca.${fn}) or ""`);
+    $("doc").textContent = doc;
+  } catch (e) { $("doc").textContent = ""; }
+}
+
+// image loading ---------------------------------------------------------------
+function loadImageFile(file) {
+  const url = URL.createObjectURL(file);
+  const img = new Image();
+  img.onload = () => {
+    URL.revokeObjectURL(url);
+    const maxsize = parseInt($("maxsize").value, 10);
+    let w = img.naturalWidth, h = img.naturalHeight;
+    if (maxsize > 0 && Math.max(w, h) > maxsize) { const s = maxsize / Math.max(w, h); w = Math.round(w * s); h = Math.round(h * s); }
+    const c = $("src"); c.width = w; c.height = h;
+    const ctx = c.getContext("2d"); ctx.drawImage(img, 0, 0, w, h);
+    imageData = ctx.getImageData(0, 0, w, h);
+    $("dims").textContent = `(${w}×${h})`;
+    const d = $("dst"); d.width = w; d.height = h; d.getContext("2d").clearRect(0, 0, w, h);
+    resultData = null; $("download").disabled = true; $("time").textContent = "";
+    $("run").disabled = !pyodide;
+  };
+  img.src = url;
+}
+$("drop").addEventListener("click", () => $("file").click());
+$("file").addEventListener("change", (e) => { if (e.target.files[0]) loadImageFile(e.target.files[0]); });
+for (const ev of ["dragenter", "dragover"]) $("drop").addEventListener(ev, (e) => { e.preventDefault(); $("drop").classList.add("over"); });
+for (const ev of ["dragleave", "drop"]) $("drop").addEventListener(ev, (e) => { e.preventDefault(); $("drop").classList.remove("over"); });
+$("drop").addEventListener("drop", (e) => { const f = e.dataTransfer.files[0]; if (f) loadImageFile(f); });
+document.addEventListener("paste", (e) => { for (const it of e.clipboardData.items) if (it.type.startsWith("image/")) loadImageFile(it.getAsFile()); });
+
+// running ---------------------------------------------------------------------
+$("run").addEventListener("click", async () => {
+  if (!pyodide || !imageData) return;
+  const fn = $("algo").value, kwargs = collectKwargs();
+  $("run").disabled = true; setStatus(`Running ${fn}…`);
+  await new Promise((r) => setTimeout(r, 20));  // let the status paint
+  const t0 = performance.now();
+  try {
+    const run = pyodide.globals.get("run_algorithm");
+    const out = run(fn, JSON.stringify(kwargs), imageData.data, imageData.height, imageData.width);
+    const bytes = out.toJs(); out.destroy(); run.destroy();
+    const d = $("dst"); const ctx = d.getContext("2d");
+    resultData = new ImageData(new Uint8ClampedArray(bytes.buffer, bytes.byteOffset, bytes.byteLength), imageData.width, imageData.height);
+    ctx.putImageData(resultData, 0, 0);
+    const ms = performance.now() - t0;
+    $("time").textContent = `${(ms / 1000).toFixed(2)} s`;
+    $("download").disabled = false;
+    setStatus(`Done: ${fn} in ${(ms / 1000).toFixed(2)} s`, "ok");
+  } catch (e) {
+    console.error(e);
+    setStatus("Error: " + (e.message || e).toString().split("\n").slice(-3).join(" "), "err");
+  } finally { $("run").disabled = false; }
+});
+
+$("download").addEventListener("click", () => {
+  $("dst").toBlob((blob) => {
+    const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `${$("algo").value}.png`; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  }, "image/png");
+});
+
+// Pyodide bootstrap -------------------------------------------------------------
+const PY_GLUE = `
+import json
+import numpy as np
+import colorcorrect.algorithm as cca
+
+def run_algorithm(name, kwargs_json, rgba, height, width):
+    kwargs = json.loads(kwargs_json)
+    data = rgba.to_bytes() if hasattr(rgba, "to_bytes") else bytes(rgba)
+    img = np.frombuffer(data, dtype=np.uint8).reshape(height, width, 4)[..., :3].copy()
+    out = getattr(cca, name)(img, **kwargs)
+    out = np.asarray(out, dtype=np.uint8)
+    rgba_out = np.empty((height, width, 4), dtype=np.uint8)
+    rgba_out[..., :3] = out
+    rgba_out[..., 3] = 255
+    return rgba_out.tobytes()
+`;
+
+async function installColorcorrect() {
+  // 1. the WebAssembly wheel built by CI (contains the C++ extension)
+  try {
+    const manifest = await (await fetch("wheels/manifest.json", { cache: "no-store" })).json();
+    if (manifest.wheel) {
+      await pyodide.loadPackage("micropip");
+      const micropip = pyodide.pyimport("micropip");
+      await micropip.install(new URL("wheels/" + manifest.wheel, location.href).href, { deps: false });
+      micropip.destroy();
+      await pyodide.runPythonAsync("import colorcorrect.algorithm");
+      return "wheel";
+    }
+  } catch (e) { console.warn("wheel install failed, falling back to the pure Python sources", e); }
+  // 2. pure Python sources (no C++ extension)
+  pyodide.FS.mkdirTree("/colorcorrect");
+  for (const f of ["__init__.py", "algorithm.py"]) {
+    const src = await (await fetch("colorcorrect/" + f, { cache: "no-store" })).text();
+    pyodide.FS.writeFile("/colorcorrect/" + f, src);
+  }
+  await pyodide.runPythonAsync("import sys; sys.path.insert(0, '/'); import colorcorrect.algorithm");
+  return "source";
+}
+
+async function main() {
+  try {
+    setStatus(`Loading Pyodide ${PYODIDE_VERSION}…`);
+    pyodide = await loadPyodide({ indexURL: PYODIDE_INDEX });
+    setStatus("Loading numpy…");
+    await pyodide.loadPackage("numpy");
+    setStatus("Loading colorcorrect…");
+    const how = await installColorcorrect();
+    hasExtension = pyodide.runPython("import colorcorrect.algorithm as cca; cca.has_extension()");
+    pyodide.runPython(PY_GLUE);
+    const version = pyodide.runPython("import sys; sys.version.split()[0]");
+    buildAlgoSelect();
+    const extNote = hasExtension ? "C++ extension: WebAssembly build loaded, every algorithm is available."
+                                 : "C++ extension not available: block based grey world runs in numpy; sampling ACE, RSR and RACE are disabled.";
+    setStatus(`Ready (Python ${version}, colorcorrect from ${how}). ${extNote}`, hasExtension ? "ok" : "warn");
+    if (imageData) $("run").disabled = false;
+  } catch (e) {
+    console.error(e);
+    setStatus("Failed to start: " + (e.message || e), "err");
+  }
+}
+const s = document.createElement("script"); s.src = PYODIDE_INDEX + "pyodide.js"; s.onload = main;
+s.onerror = () => setStatus("Could not load Pyodide from " + PYODIDE_INDEX, "err");
+document.head.appendChild(s);
+</script>
+</body>
+</html>
