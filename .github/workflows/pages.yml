@@ -24,19 +24,24 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          # the host interpreter must match the Pyodide release: 0.27.x is Python 3.12
+          python-version: "3.12"
       - name: Build the Pyodide wheel
         id: wheel
         continue-on-error: true   # the demo still works without the extension
+        env:
+          PYODIDE_VERSION: "0.27.7"   # must match PYODIDE_VERSION in docs/index.html
         run: |
-          python -m pip install cibuildwheel==4.3.5
-          python -m cibuildwheel --platform pyodide --output-dir wheelhouse
-          # newer pyodide-build tags the wheel "pyemscripten_<abi>", which the
+          python -m pip install pyodide-build==0.39.3
+          pyodide xbuildenv install "$PYODIDE_VERSION"
+          pyodide build --outdir wheelhouse
+          # pyodide-build 0.39 tags the wheel "pyemscripten_<abi>", which the
           # micropip shipped with Pyodide 0.27 rejects; it expects "pyodide_<abi>"
           for w in wheelhouse/*pyemscripten_*.whl; do
             [ -e "$w" ] && mv "$w" "${w/pyemscripten_/pyodide_}"
           done
           ls -l wheelhouse
+          python -m zipfile -l wheelhouse/*.whl | grep _cutil
       - name: Assemble the site
         run: |
           mkdir -p _site/colorcorrect _site/wheels
